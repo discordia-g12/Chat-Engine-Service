@@ -1,0 +1,17 @@
+{
+  "name": "chat-engine-service",
+  "version": "1.0.0",
+  "description": "Discordia Real-Time Chat Engine Service",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js"
+  },
+  "dependencies": {
+    "fastify": "^4.26.2",
+    "@fastify/websocket": "^10.0.1",
+    "dotenv": "^16.4.5",
+    "ioredis": "^5.4.1",
+    "mongodb": "^6.8.0"
+  }
+}
