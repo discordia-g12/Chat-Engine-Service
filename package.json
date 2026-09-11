@@ -2,10 +2,11 @@
   "name": "chat-engine-service",
   "version": "1.0.0",
   "description": "Discordia Real-Time Chat Engine Service",
-  "main": "src/server.js",
+  "main": "dist/server.js",
   "scripts": {
-    "start": "node src/server.js",
-    "dev": "node --watch src/server.js"
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "dev": "tsx watch src/server.ts"
   },
   "dependencies": {
     "fastify": "^4.26.2",
@@ -13,5 +14,10 @@
     "dotenv": "^16.4.5",
     "ioredis": "^5.4.1",
     "mongodb": "^6.8.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.5.4",
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.4"
   }
 }
