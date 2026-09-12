@@ -1,23 +1,33 @@
 import { FastifyInstance } from 'fastify';
 import fastifyWebsocket from '@fastify/websocket';
-import { Message } from '../models/Message';
-import { PermissionService } from '../services/PermissionService';
+import { ChatService } from '../services/ChatService';
 
 export default async function websocketPlugin(app: FastifyInstance) {
   app.register(fastifyWebsocket);
-
+    
   // CUANDO SE IMPLEMENTE REDIS PUB/SUB, SE REMPLAZA ESTE MAPA POR UN SUBSCRIBER
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const channels = new Map<string, Set<any>>();
 
   app.register(async function (fastify) {
     fastify.get('/channels/:channelId/ws', { websocket: true }, (connection, req) => {
       const { channelId } = req.params as { channelId: string };
+      const { last_message_id_seen } = req.query as { last_message_id_seen?: string };
 
       if (!channels.has(channelId)) {
         channels.set(channelId, new Set());
       }
       channels.get(channelId)!.add(connection);
+
+      if (last_message_id_seen) {
+        ChatService.getMissedMessages(channelId, last_message_id_seen)
+          .then((missedMessages) => {
+            for (const msg of missedMessages) {
+              connection.send(JSON.stringify(msg));
+            }
+          })
+          .catch((err) => app.log.error(err, 'Failed to recover missed messages'));
+      }
 
       connection.on('message', async (message: Buffer) => {
         try {
@@ -32,51 +42,33 @@ export default async function websocketPlugin(app: FastifyInstance) {
             return;
           }
 
-          // Validación de permisos (usa el mock provisorio)
-          const authorIdStr = String(data.authorId);
-          const hasPermission = await PermissionService.canSendMessage(authorIdStr, channelId);
-          if (!hasPermission) {
-            connection.send(JSON.stringify({ error: 'User does not have permission to send messages in this channel' }));
-            return;
-          }
-
-          const msg = new Message({
-            content: data.content,
-            authorId: authorIdStr,
-            channelId: channelId
-          });
-
-          try {
-            await msg.validate();
-          } catch (validationError) {
-            const err = validationError as { errors: Record<string, { message: string }> };
-            const firstKey = Object.keys(err.errors)[0];
-            connection.send(JSON.stringify({ error: err.errors[firstKey].message }));
-            return;
-          }
-
-          await msg.save();
-          const savedMsg = msg.toObject();
-          
-          const payload = JSON.stringify({
-            id: savedMsg._id.toString(),
-            content: savedMsg.content,
-            authorId: savedMsg.authorId,
-            channelId: savedMsg.channelId,
-            createdAt: savedMsg.createdAt
-          });
+          const savedPayload = await ChatService.sendMessage(
+            String(data.authorId),
+            channelId,
+            data.content
+          );
 
           const channelClients = channels.get(channelId);
           if (channelClients) {
+            const rawPayload = JSON.stringify(savedPayload);
             for (const client of channelClients) {
               if (client.readyState === 1) {
-                client.send(payload);
+                client.send(rawPayload);
               }
             }
           }
-
-        } catch {
-          connection.send(JSON.stringify({ error: 'Invalid JSON payload' }));
+        } catch (error) {
+          if (error instanceof SyntaxError) {
+            connection.send(JSON.stringify({ error: 'Invalid JSON payload' }));
+            return;
+          }
+          const mongooseErrors = (error as { errors?: Record<string, { message: string }> })?.errors;
+          if (mongooseErrors) {
+            const firstError = Object.values(mongooseErrors)[0];
+            connection.send(JSON.stringify({ error: firstError.message }));
+            return;
+          }
+          connection.send(JSON.stringify({ error: (error as Error).message }));
         }
       });
 
