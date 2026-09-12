@@ -1,4 +1,5 @@
 import buildApp from './app';
+import { connectDB } from './config/db';
 
 const start = async (): Promise<void> => {
   const app = buildApp();
@@ -6,6 +7,7 @@ const start = async (): Promise<void> => {
   const host = '0.0.0.0';
 
   try {
+    await connectDB();
     await app.listen({ port, host });
     app.log.info(`Chat Engine Service listening on http://${host}:${port}`);
   } catch (err) {
