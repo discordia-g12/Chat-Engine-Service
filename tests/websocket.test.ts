@@ -18,7 +18,7 @@ describe('WebSocket Endpoints', () => {
     
     app = buildApp();
     await app.listen({ port: 0 });
-    port = (app.server.address() as any).port;
+    port = (app.server.address() as { port: number }).port;
   });
 
   after(async () => {
@@ -135,7 +135,7 @@ describe('WebSocket Endpoints', () => {
     const wsA = await connectWs('channel-A');
     const wsB = await connectWs('channel-B');
 
-    return new Promise<void>((resolve, reject) => {
+    return new Promise<void>((resolve) => {
       let receivedInB = false;
 
       wsB.on('message', (data) => {

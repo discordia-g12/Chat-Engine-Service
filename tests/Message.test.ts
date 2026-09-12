@@ -22,7 +22,8 @@ describe('Message Model Validations', () => {
     try {
       await msg.validate();
       assert.fail('Should have failed');
-    } catch (error: any) {
+    } catch (err) {
+      const error = err as { errors: Record<string, { message: string }> };
       assert.ok(error.errors['content']);
       assert.strictEqual(error.errors['content'].message, 'Content is required');
     }
@@ -37,7 +38,8 @@ describe('Message Model Validations', () => {
     try {
       await msg.validate();
       assert.fail('Should have failed');
-    } catch (error: any) {
+    } catch (err) {
+      const error = err as { errors: Record<string, { message: string }> };
       assert.ok(error.errors['content']);
       assert.match(error.errors['content'].message, /Content is required|cannot be empty/);
     }
@@ -52,7 +54,8 @@ describe('Message Model Validations', () => {
     try {
       await msg.validate();
       assert.fail('Should have failed');
-    } catch (error: any) {
+    } catch (err) {
+      const error = err as { errors: Record<string, { message: string }> };
       assert.ok(error.errors['content']);
       assert.match(error.errors['content'].message, /exceeds maximum length/);
     }
@@ -67,7 +70,8 @@ describe('Message Model Validations', () => {
     try {
       await msg.validate();
       assert.fail('Should have failed');
-    } catch (error: any) {
+    } catch (err) {
+      const error = err as { errors: Record<string, { message: string }> };
       assert.ok(error.errors['content']);
       assert.match(error.errors['content'].message, /null characters/);
     }
@@ -81,7 +85,8 @@ describe('Message Model Validations', () => {
     try {
       await msg.validate();
       assert.fail('Should have failed');
-    } catch (error: any) {
+    } catch (err) {
+      const error = err as { errors: Record<string, { message: string }> };
       assert.ok(error.errors['authorId']);
     }
   });
@@ -94,7 +99,8 @@ describe('Message Model Validations', () => {
     try {
       await msg.validate();
       assert.fail('Should have failed');
-    } catch (error: any) {
+    } catch (err) {
+      const error = err as { errors: Record<string, { message: string }> };
       assert.ok(error.errors['channelId']);
     }
   });
@@ -105,7 +111,7 @@ describe('Message Model Validations', () => {
       authorId: 'user-123',
       channelId: 'channel-456',
       hack: 'DROP DATABASE'
-    } as any);
+    } as unknown as import("../src/models/Message").IMessage);
     
     await assert.doesNotReject(async () => {
       await msg.validate();

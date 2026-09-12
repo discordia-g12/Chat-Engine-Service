@@ -7,6 +7,7 @@ export default async function websocketPlugin(app: FastifyInstance) {
   app.register(fastifyWebsocket);
 
   // CUANDO SE IMPLEMENTE REDIS PUB/SUB, SE REMPLAZA ESTE MAPA POR UN SUBSCRIBER
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const channels = new Map<string, Set<any>>();
 
   app.register(async function (fastify) {
@@ -47,9 +48,10 @@ export default async function websocketPlugin(app: FastifyInstance) {
 
           try {
             await msg.validate();
-          } catch (validationError: any) {
-            const firstKey = Object.keys(validationError.errors)[0];
-            connection.send(JSON.stringify({ error: validationError.errors[firstKey].message }));
+          } catch (validationError) {
+            const err = validationError as { errors: Record<string, { message: string }> };
+            const firstKey = Object.keys(err.errors)[0];
+            connection.send(JSON.stringify({ error: err.errors[firstKey].message }));
             return;
           }
 
@@ -73,7 +75,7 @@ export default async function websocketPlugin(app: FastifyInstance) {
             }
           }
 
-        } catch (err) {
+        } catch {
           connection.send(JSON.stringify({ error: 'Invalid JSON payload' }));
         }
       });
