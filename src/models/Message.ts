@@ -39,4 +39,6 @@ const MessageSchema: Schema = new Schema({
   strict: true
 });
 
+MessageSchema.index({ channelId: 1, createdAt: -1 });
+
 export const Message = mongoose.model<IMessage>('Message', MessageSchema);
