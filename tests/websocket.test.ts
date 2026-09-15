@@ -1,4 +1,4 @@
-import { describe, it, before, after } from 'node:test';
+import { describe, it, before, after, mock } from 'node:test';
 import assert from 'node:assert';
 import WebSocket from 'ws';
 import buildApp from '../src/app';
@@ -11,7 +11,18 @@ describe('WebSocket Endpoints', () => {
   let mongoServer: MongoMemoryServer;
   let port: number;
 
+  let originalFetch: typeof globalThis.fetch;
+
   before(async () => {
+    originalFetch = globalThis.fetch;
+    mock.method(globalThis, 'fetch', async (url: string | URL | Request) => {
+      const urlStr = url.toString();
+      if (urlStr.includes('banned-user')) {
+        return { status: 403 } as Response;
+      }
+      return { status: 200 } as Response;
+    });
+
     mongoServer = await MongoMemoryServer.create();
     process.env.MONGO_URI = mongoServer.getUri();
     await connectDB();
@@ -22,6 +33,7 @@ describe('WebSocket Endpoints', () => {
   });
 
   after(async () => {
+    globalThis.fetch = originalFetch;
     await app.close();
     await disconnectDB();
     await mongoServer.stop();
