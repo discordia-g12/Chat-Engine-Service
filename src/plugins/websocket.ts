@@ -1,6 +1,7 @@
 import { FastifyInstance } from 'fastify';
 import fastifyWebsocket from '@fastify/websocket';
 import { ChatService } from '../services/ChatService';
+import { requireAuth, requireChannelAccess } from '../helpers/auth';
 
 export default async function websocketPlugin(app: FastifyInstance) {
   app.register(fastifyWebsocket);
@@ -10,9 +11,19 @@ export default async function websocketPlugin(app: FastifyInstance) {
   const channels = new Map<string, Set<any>>();
 
   app.register(async function (fastify) {
-    fastify.get('/channels/:channelId/ws', { websocket: true }, (connection, req) => {
+    fastify.get('/channels/:channelId/ws', { websocket: true }, async (connection, req) => {
       const { channelId } = req.params as { channelId: string };
       const { last_message_id_seen } = req.query as { last_message_id_seen?: string };
+
+      let userId: string;
+      try {
+        userId = await requireAuth(req);
+        await requireChannelAccess(userId, channelId);
+      } catch (error) {
+        const msg = (error as Error).message || 'Policy Violation';
+        connection.close(1008, Buffer.byteLength(msg) > 123 ? msg.substring(0, 120) + '...' : msg);
+        return;
+      }
 
       if (!channels.has(channelId)) {
         channels.set(channelId, new Set());
@@ -33,17 +44,13 @@ export default async function websocketPlugin(app: FastifyInstance) {
         try {
           const data = JSON.parse(message.toString());
 
-          if (data.authorId !== undefined && typeof data.authorId === 'number' && data.authorId <= 0) {
-            connection.send(JSON.stringify({ error: 'authorId must be positive' }));
-            return;
-          }
           if (data.id !== undefined && typeof data.id === 'number' && data.id <= 0) {
             connection.send(JSON.stringify({ error: 'id must be positive' }));
             return;
           }
 
           const savedPayload = await ChatService.sendMessage(
-            String(data.authorId),
+            userId,
             channelId,
             data.content
           );

@@ -1,4 +1,4 @@
-import { describe, it, before, after } from 'node:test';
+import { describe, it, before, after, mock } from 'node:test';
 import assert from 'node:assert';
 import WebSocket from 'ws';
 import buildApp from '../src/app';
@@ -13,8 +13,21 @@ describe('History and Reconnection', () => {
   let port: number;
   const channelId = 'channel-history';
   const seededMessages: IMessage[] = [];
+  let originalFetch: typeof globalThis.fetch;
 
   before(async () => {
+    originalFetch = globalThis.fetch;
+    mock.method(globalThis, 'fetch', async (url: string | URL | Request) => {
+      const urlStr = url.toString();
+      if (urlStr.includes('not-found-channel')) {
+        return { status: 404 } as Response;
+      }
+      if (urlStr.includes('banned-user')) {
+        return { status: 403 } as Response;
+      }
+      return { status: 200 } as Response;
+    });
+
     mongoServer = await MongoMemoryServer.create();
     process.env.MONGO_URI = mongoServer.getUri();
     await connectDB();
@@ -35,15 +48,49 @@ describe('History and Reconnection', () => {
   });
 
   after(async () => {
+    globalThis.fetch = originalFetch;
     await app.close();
     await disconnectDB();
     await mongoServer.stop();
   });
 
-  it('Should load history with pagination in chronological order', async () => {
+  it('Should reject history request without X-User-Id header', async () => {
     const res = await app.inject({
       method: 'GET',
       url: `/channels/${channelId}/messages?limit=10`
+    });
+
+    assert.strictEqual(res.statusCode, 401);
+    assert.strictEqual(res.json().error, 'Unauthorized');
+  });
+
+  it('Should reject history request for banned user', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: `/channels/${channelId}/messages?limit=10`,
+      headers: { 'x-user-id': 'banned-user' }
+    });
+
+    assert.strictEqual(res.statusCode, 403);
+    assert.strictEqual(res.json().error, 'Forbidden');
+  });
+
+  it('Should return 404 if channel not found', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: `/channels/not-found-channel/messages?limit=10`,
+      headers: { 'x-user-id': 'user-1' }
+    });
+
+    assert.strictEqual(res.statusCode, 404);
+    assert.strictEqual(res.json().error, 'Channel not found');
+  });
+
+  it('Should load history with pagination in chronological order', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: `/channels/${channelId}/messages?limit=10`,
+      headers: { 'x-user-id': 'user-1' }
     });
 
     assert.strictEqual(res.statusCode, 200);
@@ -59,7 +106,8 @@ describe('History and Reconnection', () => {
     const oldestSeenId = body.messages[0].id;
     const paginatedRes = await app.inject({
       method: 'GET',
-      url: `/channels/${channelId}/messages?limit=5&before=${oldestSeenId}`
+      url: `/channels/${channelId}/messages?limit=5&before=${oldestSeenId}`,
+      headers: { 'x-user-id': 'user-1' }
     });
 
     const paginatedBody = paginatedRes.json();
@@ -71,7 +119,7 @@ describe('History and Reconnection', () => {
     const lastSeenMessageId = seededMessages[9].id.toString(); // 
     
     return new Promise<void>((resolve, reject) => {
-      const ws = new WebSocket(`ws://localhost:${port}/channels/${channelId}/ws?last_message_id_seen=${lastSeenMessageId}`);
+      const ws = new WebSocket(`ws://localhost:${port}/channels/${channelId}/ws?last_message_id_seen=${lastSeenMessageId}`, { headers: { 'x-user-id': 'user-1' } });
       
       const receivedMessages: { content: string; createdAt: string }[] = [];
       

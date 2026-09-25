@@ -39,9 +39,9 @@ describe('WebSocket Endpoints', () => {
     await mongoServer.stop();
   });
 
-  const connectWs = (channelId: string): Promise<WebSocket> => {
+  const connectWs = (channelId: string, headers: Record<string, string> = { 'x-user-id': 'user-1' }): Promise<WebSocket> => {
     return new Promise((resolve, reject) => {
-      const ws = new WebSocket(`ws://localhost:${port}/channels/${channelId}/ws`);
+      const ws = new WebSocket(`ws://localhost:${port}/channels/${channelId}/ws`, { headers });
       ws.on('open', () => resolve(ws));
       ws.on('error', reject);
     });
@@ -82,34 +82,40 @@ describe('WebSocket Endpoints', () => {
     });
   });
 
-  it('should return error if authorId is negative integer', async () => {
-    const ws = await connectWs('channel-3');
-
+  it('should reject connection without X-User-Id header', async () => {
     return new Promise<void>((resolve) => {
-      ws.on('message', (data) => {
-        const response = JSON.parse(data.toString());
-        assert.strictEqual(response.error, 'authorId must be positive');
-        ws.close();
+      const ws = new WebSocket(`ws://localhost:${port}/channels/channel-test/ws`);
+      ws.on('close', (code, reason) => {
+        assert.strictEqual(code, 1008);
+        assert.strictEqual(reason.toString(), 'Missing X-User-Id header');
         resolve();
       });
-
-      ws.send(JSON.stringify({ authorId: -5, content: 'Test' }));
     });
   });
 
-  // TEST USA EL MOCK DE PERMISOS PROVISORIO
-  it('should return error if user is banned (Permission Mock)', async () => {
-    const ws = await connectWs('channel-4');
+  it('should reject connection for banned user', async () => {
+    return new Promise<void>((resolve) => {
+      const ws = new WebSocket(`ws://localhost:${port}/channels/channel-test/ws`, { headers: { 'x-user-id': 'banned-user' } });
+      ws.on('close', (code, reason) => {
+        assert.strictEqual(code, 1008);
+        assert.strictEqual(reason.toString(), 'User does not have permission to access this channel');
+        resolve();
+      });
+    });
+  });
 
+  it('should use X-User-Id as authorId, ignoring payload authorId', async () => {
+    const ws = await connectWs('channel-7', { 'x-user-id': 'real-user' });
+    
     return new Promise<void>((resolve) => {
       ws.on('message', (data) => {
         const response = JSON.parse(data.toString());
-        assert.strictEqual(response.error, 'User does not have permission to send messages in this channel');
+        assert.strictEqual(response.authorId, 'real-user');
         ws.close();
         resolve();
       });
 
-      ws.send(JSON.stringify({ authorId: 'banned-user', content: 'Trying to spam' }));
+      ws.send(JSON.stringify({ authorId: 'fake-user', content: 'Test' }));
     });
   });
 
