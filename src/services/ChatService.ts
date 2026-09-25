@@ -26,14 +26,11 @@ export class ChatService {
     const query: Record<string, any> = { channelId };
 
     if (before) {
-      const referenceMessage = await Message.findById(before).lean<IMessage>();
-      if (referenceMessage) {
-        query.createdAt = { $lt: referenceMessage.createdAt };
-      }
+      query._id = { $lt: before };
     }
 
     const messages = await Message.find(query)
-      .sort({ createdAt: -1 })
+      .sort({ _id: -1 })
       .limit(limit)
       .lean<IMessage[]>();
 
@@ -64,9 +61,9 @@ export class ChatService {
 
     const missedMessages = await Message.find({
       channelId,
-      createdAt: { $gt: lastSeen.createdAt },
+      _id: { $gt: lastMessageIdSeen },
     })
-      .sort({ createdAt: 1 })
+      .sort({ _id: 1 })
       .lean<IMessage[]>();
 
     return missedMessages.map((msg) => ({
