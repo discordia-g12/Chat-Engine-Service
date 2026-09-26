@@ -1,93 +1,83 @@
 import { FastifyInstance } from 'fastify';
 import fastifyWebsocket from '@fastify/websocket';
+import type { WebSocket } from 'ws';
 import { ChatService } from '../services/ChatService';
-import { requireAuth, requireChannelAccess } from '../helpers/auth';
+import { channelAccessGuard } from '../helpers/auth';
+import { toProblem, ValidationError } from '../errors';
 
 export default async function websocketPlugin(app: FastifyInstance) {
   app.register(fastifyWebsocket);
-    
+
   // CUANDO SE IMPLEMENTE REDIS PUB/SUB, SE REMPLAZA ESTE MAPA POR UN SUBSCRIBER
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const channels = new Map<string, Set<any>>();
+  const channels = new Map<string, Set<WebSocket>>();
 
   app.register(async function (fastify) {
-    fastify.get('/channels/:channelId/ws', { websocket: true }, async (connection, req) => {
-      const { channelId } = req.params as { channelId: string };
-      const { last_message_id_seen } = req.query as { last_message_id_seen?: string };
+    fastify.get(
+      '/channels/:channelId/ws',
+      { websocket: true, preValidation: channelAccessGuard },
+      (connection, req) => {
+        const { channelId } = req.params as { channelId: string };
+        const { last_message_id_seen } = req.query as { last_message_id_seen?: string };
+        const userId = req.userId;
 
-      let userId: string;
-      try {
-        userId = await requireAuth(req);
-        await requireChannelAccess(userId, channelId);
-      } catch (error) {
-        const msg = (error as Error).message || 'Policy Violation';
-        connection.close(1008, Buffer.byteLength(msg) > 123 ? msg.substring(0, 120) + '...' : msg);
-        return;
-      }
+        if (!channels.has(channelId)) {
+          channels.set(channelId, new Set());
+        }
+        channels.get(channelId)!.add(connection);
 
-      if (!channels.has(channelId)) {
-        channels.set(channelId, new Set());
-      }
-      channels.get(channelId)!.add(connection);
-
-      if (last_message_id_seen) {
-        ChatService.getMissedMessages(channelId, last_message_id_seen)
-          .then((missedMessages) => {
-            for (const msg of missedMessages) {
-              connection.send(JSON.stringify(msg));
+        connection.on('message', async (message: Buffer) => {
+          try {
+            let data;
+            try {
+              data = JSON.parse(message.toString());
+            } catch {
+              throw new ValidationError('Invalid JSON payload');
             }
-          })
-          .catch((err) => app.log.error(err, 'Failed to recover missed messages'));
-      }
 
-      connection.on('message', async (message: Buffer) => {
-        try {
-          const data = JSON.parse(message.toString());
+            if (data.id !== undefined && typeof data.id === 'number' && data.id <= 0) {
+              throw new ValidationError('id must be positive');
+            }
 
-          if (data.id !== undefined && typeof data.id === 'number' && data.id <= 0) {
-            connection.send(JSON.stringify({ error: 'id must be positive' }));
-            return;
-          }
+            const savedPayload = await ChatService.sendMessage(userId, channelId, data.content);
 
-          const savedPayload = await ChatService.sendMessage(
-            userId,
-            channelId,
-            data.content
-          );
-
-          const channelClients = channels.get(channelId);
-          if (channelClients) {
-            const rawPayload = JSON.stringify(savedPayload);
-            for (const client of channelClients) {
-              if (client.readyState === 1) {
-                client.send(rawPayload);
+            const channelClients = channels.get(channelId);
+            if (channelClients) {
+              const rawPayload = JSON.stringify(savedPayload);
+              for (const client of channelClients) {
+                if (client.readyState === 1) {
+                  client.send(rawPayload);
+                }
               }
             }
+          } catch (error) {
+            const problem = toProblem(error);
+            if (problem.status >= 500) {
+              req.log.error({ err: error, channelId }, 'Failed to handle WS message');
+            }
+            connection.send(JSON.stringify({ error: problem.detail, status: problem.status }));
           }
-        } catch (error) {
-          if (error instanceof SyntaxError) {
-            connection.send(JSON.stringify({ error: 'Invalid JSON payload' }));
-            return;
-          }
-          const mongooseErrors = (error as { errors?: Record<string, { message: string }> })?.errors;
-          if (mongooseErrors) {
-            const firstError = Object.values(mongooseErrors)[0];
-            connection.send(JSON.stringify({ error: firstError.message }));
-            return;
-          }
-          connection.send(JSON.stringify({ error: (error as Error).message }));
-        }
-      });
+        });
 
-      connection.on('close', () => {
-        const channelClients = channels.get(channelId);
-        if (channelClients) {
-          channelClients.delete(connection);
-          if (channelClients.size === 0) {
-            channels.delete(channelId);
+        connection.on('close', () => {
+          const channelClients = channels.get(channelId);
+          if (channelClients) {
+            channelClients.delete(connection);
+            if (channelClients.size === 0) {
+              channels.delete(channelId);
+            }
           }
+        });
+
+        if (last_message_id_seen) {
+          ChatService.getMissedMessages(channelId, last_message_id_seen)
+            .then((missedMessages) => {
+              for (const msg of missedMessages) {
+                connection.send(JSON.stringify(msg));
+              }
+            })
+            .catch((err) => app.log.error(err, 'Failed to recover missed messages'));
         }
-      });
-    });
+      }
+    );
   });
 }

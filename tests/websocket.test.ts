@@ -20,6 +20,16 @@ describe('WebSocket Endpoints', () => {
       if (urlStr.includes('banned-user')) {
         return { status: 403 } as Response;
       }
+      if (urlStr.includes('not-found-channel')) {
+        return { status: 404 } as Response;
+      }
+      if (urlStr.includes('core-down-user')) {
+        throw new Error('fetch failed');
+      }
+      if (urlStr.includes('slow-user')) {
+        // Simulates a slow Core: the permission check takes a while to answer.
+        await new Promise((r) => setTimeout(r, 300));
+      }
       return { status: 200 } as Response;
     });
 
@@ -74,6 +84,7 @@ describe('WebSocket Endpoints', () => {
       ws.on('message', (data) => {
         const response = JSON.parse(data.toString());
         assert.strictEqual(response.error, 'Invalid JSON payload');
+        assert.strictEqual(response.status, 400);
         ws.close();
         resolve();
       });
@@ -82,26 +93,64 @@ describe('WebSocket Endpoints', () => {
     });
   });
 
-  it('should reject connection without X-User-Id header', async () => {
-    return new Promise<void>((resolve) => {
-      const ws = new WebSocket(`ws://localhost:${port}/channels/channel-test/ws`);
-      ws.on('close', (code, reason) => {
-        assert.strictEqual(code, 1008);
-        assert.strictEqual(reason.toString(), 'Missing X-User-Id header');
-        resolve();
+  // Rejections now happen during the HTTP handshake (preValidation), so the
+  // client gets a real HTTP status and the socket is never opened.
+  const expectHandshakeRejection = (
+    channelId: string,
+    headers: Record<string, string>
+  ): Promise<{ status: number; body: { title: string; detail: string } }> => {
+    return new Promise((resolve, reject) => {
+      const ws = new WebSocket(`ws://localhost:${port}/channels/${channelId}/ws`, { headers });
+      ws.on('open', () => {
+        ws.close();
+        reject(new Error('Socket should not have been opened'));
       });
+      ws.on('unexpected-response', (_req, res) => {
+        let raw = '';
+        res.on('data', (chunk: Buffer) => (raw += chunk.toString()));
+        res.on('end', () => resolve({ status: res.statusCode ?? 0, body: JSON.parse(raw) }));
+      });
+      ws.on('error', () => {}); // 'unexpected-response' already handles the rejection
     });
+  };
+
+  it('should reject handshake with 401 without X-User-Id header', { timeout: 3000 }, async () => {
+    const { status, body } = await expectHandshakeRejection('channel-test', {});
+    assert.strictEqual(status, 401);
+    assert.strictEqual(body.detail, 'Missing X-User-Id header');
   });
 
-  it('should reject connection for banned user', async () => {
-    return new Promise<void>((resolve) => {
-      const ws = new WebSocket(`ws://localhost:${port}/channels/channel-test/ws`, { headers: { 'x-user-id': 'banned-user' } });
-      ws.on('close', (code, reason) => {
-        assert.strictEqual(code, 1008);
-        assert.strictEqual(reason.toString(), 'User does not have permission to access this channel');
-        resolve();
+  it('should reject handshake with 403 for banned user', { timeout: 3000 }, async () => {
+    const { status, body } = await expectHandshakeRejection('channel-test', { 'x-user-id': 'banned-user' });
+    assert.strictEqual(status, 403);
+    assert.strictEqual(body.detail, 'User does not have permission to access this channel');
+  });
+
+  it('should reject handshake with 404 for unknown channel', { timeout: 3000 }, async () => {
+    const { status, body } = await expectHandshakeRejection('not-found-channel', { 'x-user-id': 'user-1' });
+    assert.strictEqual(status, 404);
+    assert.strictEqual(body.detail, 'Channel not found');
+  });
+
+  it('should reject handshake with 503 (not 403) when Core is unreachable', { timeout: 3000 }, async () => {
+    const { status, body } = await expectHandshakeRejection('channel-test', { 'x-user-id': 'core-down-user' });
+    assert.strictEqual(status, 503);
+    assert.strictEqual(body.detail, 'Failed to communicate with permission service');
+  });
+
+  it('should not lose a message sent right after open, even with a slow permission check', { timeout: 5000 }, async () => {
+    const ws = await connectWs('channel-slow', { 'x-user-id': 'slow-user' });
+    try {
+      const reply = new Promise<{ content: string; authorId: string }>((resolve) => {
+        ws.once('message', (data) => resolve(JSON.parse(data.toString())));
       });
-    });
+      ws.send(JSON.stringify({ content: 'sent immediately on open' }));
+      const msg = await reply;
+      assert.strictEqual(msg.content, 'sent immediately on open');
+      assert.strictEqual(msg.authorId, 'slow-user');
+    } finally {
+      ws.close();
+    }
   });
 
   it('should use X-User-Id as authorId, ignoring payload authorId', async () => {

@@ -25,6 +25,9 @@ describe('History and Reconnection', () => {
       if (urlStr.includes('banned-user')) {
         return { status: 403 } as Response;
       }
+      if (urlStr.includes('core-down-user')) {
+        throw new Error('fetch failed');
+      }
       return { status: 200 } as Response;
     });
 
@@ -61,7 +64,9 @@ describe('History and Reconnection', () => {
     });
 
     assert.strictEqual(res.statusCode, 401);
-    assert.strictEqual(res.json().error, 'Unauthorized');
+    assert.match(res.headers['content-type'] as string, /application\/problem\+json/);
+    assert.strictEqual(res.json().title, 'Unauthorized');
+    assert.strictEqual(res.json().detail, 'Missing X-User-Id header');
   });
 
   it('Should reject history request for banned user', async () => {
@@ -72,7 +77,7 @@ describe('History and Reconnection', () => {
     });
 
     assert.strictEqual(res.statusCode, 403);
-    assert.strictEqual(res.json().error, 'Forbidden');
+    assert.strictEqual(res.json().title, 'Forbidden');
   });
 
   it('Should return 404 if channel not found', async () => {
@@ -83,7 +88,42 @@ describe('History and Reconnection', () => {
     });
 
     assert.strictEqual(res.statusCode, 404);
-    assert.strictEqual(res.json().error, 'Channel not found');
+    assert.strictEqual(res.json().detail, 'Channel not found');
+  });
+
+  it('Should return 503 (not 403) when Core is unreachable', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: `/channels/${channelId}/messages?limit=10`,
+      headers: { 'x-user-id': 'core-down-user' }
+    });
+
+    assert.strictEqual(res.statusCode, 503);
+    assert.deepStrictEqual(res.json(), {
+      type: 'about:blank',
+      title: 'Service Unavailable',
+      status: 503,
+      detail: 'Failed to communicate with permission service',
+      instance: `/channels/${channelId}/messages?limit=10`
+    });
+  });
+
+  it('Should hide internal details on unexpected errors (500)', async () => {
+    // Invalid ObjectId cursor makes Mongoose throw a CastError: not a client-safe message.
+    const res = await app.inject({
+      method: 'GET',
+      url: `/channels/${channelId}/messages?before=not-an-object-id`,
+      headers: { 'x-user-id': 'user-1' }
+    });
+
+    assert.strictEqual(res.statusCode, 500);
+    assert.strictEqual(res.json().detail, 'An unexpected error occurred');
+  });
+
+  it('Should return problem+json 404 for unknown routes', async () => {
+    const res = await app.inject({ method: 'GET', url: '/nope' });
+    assert.strictEqual(res.statusCode, 404);
+    assert.strictEqual(res.json().title, 'Not Found');
   });
 
   it('Should load history with pagination in chronological order', async () => {

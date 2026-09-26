@@ -1,5 +1,6 @@
 import { Message, IMessage } from '../models/Message';
 import { PermissionService } from './PermissionService';
+import { ForbiddenError } from '../errors';
 
 export interface MessagePayload {
   id: string;
@@ -89,7 +90,7 @@ export class ChatService {
   ): Promise<MessagePayload> {
     const hasPermission = await PermissionService.canSendMessage(authorId, channelId);
     if (!hasPermission) {
-      throw new Error('User does not have permission to send messages in this channel');
+      throw new ForbiddenError('User does not have permission to send messages in this channel');
     }
 
     const messageDocument = new Message({

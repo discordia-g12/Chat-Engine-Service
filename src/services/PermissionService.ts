@@ -1,11 +1,13 @@
+import { NotFoundError, UpstreamUnavailableError } from '../errors';
+
 export class PermissionService {
   /**
    * Checks if a user is allowed to send messages in a specific channel
    * by querying the Server-Roles-Core-Service.
-   * 
-   * @param userId The ID of the user trying to send a message
-   * @param channelId The ID of the channel
-   * @returns Promise resolving to true if permitted, false otherwise
+   *
+   * @returns true if permitted, false if Core denies it (403)
+   * @throws NotFoundError if the channel does not exist
+   * @throws UpstreamUnavailableError if Core is unreachable or answers unexpectedly
    */
   static async canSendMessage(userId: string, channelId: string): Promise<boolean> {
     if (!userId || !channelId) {
@@ -13,28 +15,26 @@ export class PermissionService {
     }
 
     const coreUrl = process.env.CORE_SERVICE_URL || 'http://localhost:8000';
-    
+    const url = `${coreUrl}/internal/channels/${encodeURIComponent(channelId)}/can-send?${new URLSearchParams({ user_id: userId })}`;
+
+    let response: Response;
     try {
-      const response = await fetch(`${coreUrl}/internal/channels/${channelId}/can-send?user_id=${userId}`);
-      
-      if (response.status === 200) {
+      response = await fetch(url);
+    } catch (cause) {
+      throw new UpstreamUnavailableError('Failed to communicate with permission service', { cause });
+    }
+
+    switch (response.status) {
+      case 200:
         return true;
-      }
-      
-      if (response.status === 403) {
+      case 403:
         return false;
-      }
-      
-      if (response.status === 404) {
-        throw new Error('Channel not found');
-      }
-      
-      throw new Error(`Core service returned unexpected status: ${response.status}`);
-    } catch (error) {
-      if (error instanceof Error && error.message === 'Channel not found') {
-        throw error;
-      }
-      throw new Error('Failed to communicate with permission service');
+      case 404:
+        throw new NotFoundError('Channel not found');
+      default:
+        throw new UpstreamUnavailableError('Failed to communicate with permission service', {
+          cause: new Error(`Core service returned unexpected status: ${response.status}`),
+        });
     }
   }
 }
