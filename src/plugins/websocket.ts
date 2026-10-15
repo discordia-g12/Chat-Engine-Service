@@ -4,8 +4,13 @@ import { ChatService } from '../services/ChatService';
 import { SessionManager } from '../services/SessionManager';
 import { channelAccessGuard } from '../helpers/auth';
 import { toProblem, ValidationError, ForbiddenError } from '../errors';
+import { startHeartbeat } from '../helpers/heartbeat';
 
-export default async function websocketPlugin(app: FastifyInstance) {
+export interface WebsocketPluginOptions {
+  pingIntervalMs: number;
+}
+
+export default async function websocketPlugin(app: FastifyInstance, opts: WebsocketPluginOptions) {
   app.register(fastifyWebsocket);
 
   app.register(async function (fastify) {
@@ -25,6 +30,8 @@ export default async function websocketPlugin(app: FastifyInstance) {
           canSend: true,
           connectedAt: new Date(),
         });
+        // Mantiene viva la conexión detrás de Cloudflare y corta las que quedaron muertas
+        const stopHeartbeat = startHeartbeat(connection, opts.pingIntervalMs);
 
         connection.on('message', async (message: Buffer) => {
           try {
@@ -62,6 +69,7 @@ export default async function websocketPlugin(app: FastifyInstance) {
         });
 
         connection.on('close', () => {
+          stopHeartbeat();
           SessionManager.unregister(connection);
         });
 

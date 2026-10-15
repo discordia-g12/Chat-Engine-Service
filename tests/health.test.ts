@@ -48,7 +48,7 @@ describe('Health endpoints', () => {
     const app = buildApp({ redis: healthyRedis });
     const res = await app.inject({ method: 'GET', url: '/readyz' });
     assert.strictEqual(res.statusCode, 200);
-    assert.deepStrictEqual(res.json(), { status: 'ready', checks: { mongo: 'ok', redis: 'ok' } });
+    assert.deepStrictEqual(res.json(), { status: 'ready', checks: { mongo: 'ok', redis: 'ok', rabbitmq: 'disconnected' } });
     await app.close();
   });
 
@@ -56,7 +56,7 @@ describe('Health endpoints', () => {
     const app = buildApp({ redis: downRedis });
     const res = await app.inject({ method: 'GET', url: '/readyz' });
     assert.strictEqual(res.statusCode, 503);
-    assert.deepStrictEqual(res.json(), { status: 'not_ready', checks: { mongo: 'ok', redis: 'fail' } });
+    assert.deepStrictEqual(res.json(), { status: 'not_ready', checks: { mongo: 'ok', redis: 'fail', rabbitmq: 'disconnected' } });
     await app.close();
   });
 
@@ -98,7 +98,7 @@ describe('Health endpoints', () => {
     try {
       const res = await app.inject({ method: 'GET', url: '/readyz' });
       assert.strictEqual(res.statusCode, 503);
-      assert.deepStrictEqual(res.json(), { status: 'not_ready', checks: { mongo: 'fail', redis: 'ok' } });
+      assert.deepStrictEqual(res.json(), { status: 'not_ready', checks: { mongo: 'fail', redis: 'ok', rabbitmq: 'disconnected' } });
     } finally {
       await app.close();
       await connectDB();
