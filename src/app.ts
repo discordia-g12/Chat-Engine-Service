@@ -1,5 +1,7 @@
 import Fastify, { FastifyInstance } from 'fastify';
 import websocketPlugin from './plugins/websocket';
+import { DEFAULT_PING_INTERVAL_MS } from './helpers/heartbeat';
+import { EventConsumer } from './services/EventConsumer';
 import historyPlugin from './plugins/history';
 import { registerErrorHandler } from './plugins/errorHandler';
 import { getRedis } from './config/redis';
@@ -9,6 +11,8 @@ export interface BuildAppOptions {
   /** Redis client used by /readyz. Defaults to the shared client (created lazily). */
   redis?: RedisPinger;
   readinessTimeoutMs?: number;
+  /** Cada cuánto se pinguea cada WebSocket de canal (ver helpers/heartbeat). */
+  wsPingIntervalMs?: number;
 }
 
 function buildApp(opts: BuildAppOptions = {}): FastifyInstance {
@@ -18,7 +22,9 @@ function buildApp(opts: BuildAppOptions = {}): FastifyInstance {
   registerErrorHandler(app);
   app.decorateRequest('userId', '');
 
-  app.register(websocketPlugin);
+  app.register(websocketPlugin, {
+    pingIntervalMs: opts.wsPingIntervalMs ?? DEFAULT_PING_INTERVAL_MS,
+  });
   app.register(historyPlugin);
 
   app.get('/livez', async () => {
@@ -31,7 +37,9 @@ function buildApp(opts: BuildAppOptions = {}): FastifyInstance {
       checkMongo(readinessTimeoutMs),
       checkRedis(redis, readinessTimeoutMs),
     ]);
-    const checks = { mongo, redis: redisStatus };
+    // RabbitMQ se informa pero no define "ready": sin eventos el chat sigue funcionando (los bans y
+    // mutes en vivo esperan a que vuelva) y marcarlo no-ready propagaría una caída del nodo infra.
+    const checks = { mongo, redis: redisStatus, rabbitmq: EventConsumer.isConnected ? 'ok' : 'disconnected' };
     const ready = mongo === 'ok' && redisStatus === 'ok';
 
     if (!ready) {

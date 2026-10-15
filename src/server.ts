@@ -18,7 +18,8 @@ const start = async (): Promise<void> => {
 
   try {
     await connectDB();
-    await EventConsumer.start();
+    // No bloquea: si RabbitMQ (nodo infra) no está, el chat arranca igual y el consumidor reintenta solo
+    EventConsumer.start({ logger: app.log });
     await app.listen({ port, host });
     app.log.info(`Chat Engine Service listening on http://${host}:${port}`);
   } catch (err) {
