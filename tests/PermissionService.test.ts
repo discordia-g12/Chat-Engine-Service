@@ -13,22 +13,26 @@ describe('PermissionService', () => {
     globalThis.fetch = originalFetch;
   });
 
-  it('should return true for a permitted user (200 OK)', async () => {
+  it('should return allowed true and serverId for a permitted user (200 OK)', async () => {
     mock.method(globalThis, 'fetch', async () => {
-      return { status: 200 } as Response;
+      return {
+        status: 200,
+        json: async () => ({ can_send: true, server_id: 'srv-123' }),
+      } as Response;
     });
 
     const result = await PermissionService.canSendMessage('valid-user', 'channel-1');
-    assert.strictEqual(result, true);
+    assert.strictEqual(result.allowed, true);
+    assert.strictEqual(result.serverId, 'srv-123');
   });
 
-  it('should return false for an unauthorized user (403 Forbidden)', async () => {
+  it('should return allowed false for an unauthorized user (403 Forbidden)', async () => {
     mock.method(globalThis, 'fetch', async () => {
       return { status: 403 } as Response;
     });
 
     const result = await PermissionService.canSendMessage('banned-user', 'channel-1');
-    assert.strictEqual(result, false);
+    assert.strictEqual(result.allowed, false);
   });
 
   it('should throw an error if the channel does not exist (404 Not Found)', async () => {

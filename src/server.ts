@@ -1,6 +1,7 @@
 import buildApp from './app';
 import { connectDB } from './config/db';
 import { getRedis, disconnectRedis } from './config/redis';
+import { EventConsumer } from './services/EventConsumer';
 
 const start = async (): Promise<void> => {
   const app = buildApp();
@@ -12,10 +13,12 @@ const start = async (): Promise<void> => {
   getRedis().on('error', (err) => app.log.warn({ err }, 'Redis connection error'));
   app.addHook('onClose', async () => {
     await disconnectRedis();
+    await EventConsumer.stop();
   });
 
   try {
     await connectDB();
+    await EventConsumer.start();
     await app.listen({ port, host });
     app.log.info(`Chat Engine Service listening on http://${host}:${port}`);
   } catch (err) {

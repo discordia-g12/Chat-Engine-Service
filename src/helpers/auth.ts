@@ -6,6 +6,8 @@ declare module 'fastify' {
   interface FastifyRequest {
     /** Set by `channelAccessGuard` once the caller is authenticated and authorized. */
     userId: string;
+    /** Server that owns the requested channel, resolved during access validation. */
+    serverId?: string;
   }
 }
 
@@ -25,11 +27,12 @@ export function requireAuth(req: FastifyRequest): string {
   return userId;
 }
 
-export async function requireChannelAccess(userId: string, channelId: string): Promise<void> {
-  const canSend = await PermissionService.canSendMessage(userId, channelId);
-  if (!canSend) {
+export async function requireChannelAccess(userId: string, channelId: string): Promise<string | undefined> {
+  const result = await PermissionService.canSendMessage(userId, channelId);
+  if (!result.allowed) {
     throw new ForbiddenError('User does not have permission to access this channel');
   }
+  return result.serverId;
 }
 
 /**
@@ -42,6 +45,7 @@ export async function requireChannelAccess(userId: string, channelId: string): P
 export async function channelAccessGuard(req: FastifyRequest): Promise<void> {
   const { channelId } = req.params as { channelId: string };
   const userId = requireAuth(req);
-  await requireChannelAccess(userId, channelId);
+  const serverId = await requireChannelAccess(userId, channelId);
   req.userId = userId;
+  req.serverId = serverId;
 }

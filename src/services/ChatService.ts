@@ -86,11 +86,14 @@ export class ChatService {
   static async sendMessage(
     authorId: string,
     channelId: string,
-    content: string
+    content: string,
+    skipPermissionCheck = false
   ): Promise<MessagePayload> {
-    const hasPermission = await PermissionService.canSendMessage(authorId, channelId);
-    if (!hasPermission) {
-      throw new ForbiddenError('User does not have permission to send messages in this channel');
+    if (!skipPermissionCheck) {
+      const result = await PermissionService.canSendMessage(authorId, channelId);
+      if (!result.allowed) {
+        throw new ForbiddenError('User does not have permission to send messages in this channel');
+      }
     }
 
     const messageDocument = new Message({
