@@ -1,15 +1,17 @@
 import { FastifyInstance } from 'fastify';
 import fastifyWebsocket from '@fastify/websocket';
-import type { WebSocket } from 'ws';
 import { ChatService } from '../services/ChatService';
+import { SessionManager } from '../services/SessionManager';
 import { channelAccessGuard } from '../helpers/auth';
-import { toProblem, ValidationError } from '../errors';
+import { toProblem, ValidationError, ForbiddenError } from '../errors';
+import { startHeartbeat } from '../helpers/heartbeat';
 
-export default async function websocketPlugin(app: FastifyInstance) {
+export interface WebsocketPluginOptions {
+  pingIntervalMs: number;
+}
+
+export default async function websocketPlugin(app: FastifyInstance, opts: WebsocketPluginOptions) {
   app.register(fastifyWebsocket);
-
-  // CUANDO SE IMPLEMENTE REDIS PUB/SUB, SE REMPLAZA ESTE MAPA POR UN SUBSCRIBER
-  const channels = new Map<string, Set<WebSocket>>();
 
   app.register(async function (fastify) {
     fastify.get(
@@ -20,10 +22,16 @@ export default async function websocketPlugin(app: FastifyInstance) {
         const { last_message_id_seen } = req.query as { last_message_id_seen?: string };
         const userId = req.userId;
 
-        if (!channels.has(channelId)) {
-          channels.set(channelId, new Set());
-        }
-        channels.get(channelId)!.add(connection);
+        SessionManager.register({
+          userId,
+          channelId,
+          serverId: req.serverId || '',
+          socket: connection,
+          canSend: true,
+          connectedAt: new Date(),
+        });
+        // Mantiene viva la conexión detrás de Cloudflare y corta las que quedaron muertas
+        const stopHeartbeat = startHeartbeat(connection, opts.pingIntervalMs);
 
         connection.on('message', async (message: Buffer) => {
           try {
@@ -38,15 +46,17 @@ export default async function websocketPlugin(app: FastifyInstance) {
               throw new ValidationError('id must be positive');
             }
 
-            const savedPayload = await ChatService.sendMessage(userId, channelId, data.content);
+            if (!SessionManager.canSend(connection)) {
+              throw new ForbiddenError('User does not have permission to send messages in this channel');
+            }
 
-            const channelClients = channels.get(channelId);
-            if (channelClients) {
-              const rawPayload = JSON.stringify(savedPayload);
-              for (const client of channelClients) {
-                if (client.readyState === 1) {
-                  client.send(rawPayload);
-                }
+            const savedPayload = await ChatService.sendMessage(userId, channelId, data.content, true);
+
+            const channelClients = SessionManager.getChannelSockets(channelId);
+            const rawPayload = JSON.stringify(savedPayload);
+            for (const client of channelClients) {
+              if (client.readyState === 1) {
+                client.send(rawPayload);
               }
             }
           } catch (error) {
@@ -59,13 +69,8 @@ export default async function websocketPlugin(app: FastifyInstance) {
         });
 
         connection.on('close', () => {
-          const channelClients = channels.get(channelId);
-          if (channelClients) {
-            channelClients.delete(connection);
-            if (channelClients.size === 0) {
-              channels.delete(channelId);
-            }
-          }
+          stopHeartbeat();
+          SessionManager.unregister(connection);
         });
 
         if (last_message_id_seen) {
