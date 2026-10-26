@@ -17,6 +17,7 @@ describe('WebSocket Endpoints', () => {
     originalFetch = globalThis.fetch;
     mock.method(globalThis, 'fetch', async (url: string | URL | Request) => {
       const urlStr = url.toString();
+      const access = (body: object) => ({ status: 200, json: async () => ({ server_id: 'srv-1', ...body }) }) as Response;
       if (urlStr.includes('banned-user')) {
         return { status: 403 } as Response;
       }
@@ -26,11 +27,18 @@ describe('WebSocket Endpoints', () => {
       if (urlStr.includes('core-down-user')) {
         throw new Error('fetch failed');
       }
+      if (urlStr.includes('temp-muted-user')) {
+        // Muteado por poco tiempo: puede leer, y el chat lo habilita solo al vencer el mute
+        return access({ can_send: false, muted_until: new Date(Date.now() + 200).toISOString() });
+      }
+      if (urlStr.includes('muted-user')) {
+        return access({ can_send: false, muted_until: null });
+      }
       if (urlStr.includes('slow-user')) {
         // Simulates a slow Core: the permission check takes a while to answer.
         await new Promise((r) => setTimeout(r, 300));
       }
-      return { status: 200 } as Response;
+      return access({ can_send: true, muted_until: null });
     });
 
     mongoServer = await MongoMemoryServer.create();
@@ -148,6 +156,69 @@ describe('WebSocket Endpoints', () => {
       const msg = await reply;
       assert.strictEqual(msg.content, 'sent immediately on open');
       assert.strictEqual(msg.authorId, 'slow-user');
+    } finally {
+      ws.close();
+    }
+  });
+
+  /** Abre el socket y junta los mensajes desde el primero (el aviso de permisos llega apenas abre). */
+  const connectCollecting = (channelId: string, userId: string): Promise<{ ws: WebSocket; next: () => Promise<Record<string, unknown>> }> => {
+    return new Promise((resolve, reject) => {
+      const ws = new WebSocket(`ws://localhost:${port}/channels/${channelId}/ws`, { headers: { 'x-user-id': userId } });
+      const queue: Record<string, unknown>[] = [];
+      const waiters: ((msg: Record<string, unknown>) => void)[] = [];
+      ws.on('message', (data) => {
+        const msg = JSON.parse(data.toString());
+        const waiter = waiters.shift();
+        if (waiter) waiter(msg);
+        else queue.push(msg);
+      });
+      const next = () =>
+        new Promise<Record<string, unknown>>((res) => {
+          const queued = queue.shift();
+          if (queued) res(queued);
+          else waiters.push(res);
+        });
+      ws.on('open', () => resolve({ ws, next }));
+      ws.on('error', reject);
+    });
+  };
+
+  it('lets a muted user open the channel but not write, and tells them on open', { timeout: 3000 }, async () => {
+    const { ws, next } = await connectCollecting('channel-muted', 'muted-user');
+    try {
+      assert.deepStrictEqual(await next(), { type: 'PERMISSIONS_UPDATED', canSend: false, channelId: 'channel-muted' });
+
+      ws.send(JSON.stringify({ content: 'should not be saved' }));
+      const reply = await next();
+      assert.strictEqual(reply.status, 403);
+      assert.strictEqual(reply.error, 'User does not have permission to send messages in this channel');
+    } finally {
+      ws.close();
+    }
+  });
+
+  it('enables writing when the mute of a user who connected muted expires', { timeout: 3000 }, async () => {
+    const { ws, next } = await connectCollecting('channel-temp-muted', 'temp-muted-user');
+    try {
+      assert.strictEqual((await next()).canSend, false);
+      assert.deepStrictEqual(await next(), { type: 'PERMISSIONS_UPDATED', canSend: true, channelId: 'channel-temp-muted' });
+
+      ws.send(JSON.stringify({ content: 'after the mute' }));
+      const msg = await next();
+      assert.strictEqual(msg.content, 'after the mute');
+      assert.strictEqual(msg.authorId, 'temp-muted-user');
+    } finally {
+      ws.close();
+    }
+  });
+
+  it('does not send a permissions message to a user who can write', { timeout: 3000 }, async () => {
+    const { ws, next } = await connectCollecting('channel-can-send', 'user-1');
+    try {
+      ws.send(JSON.stringify({ content: 'first message' }));
+      // Lo primero que llega es el propio mensaje, no un aviso de permisos
+      assert.strictEqual((await next()).content, 'first message');
     } finally {
       ws.close();
     }

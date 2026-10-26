@@ -2,6 +2,8 @@ import { describe, it, before, after, mock } from 'node:test';
 import assert from 'node:assert';
 import { PermissionService } from '../src/services/PermissionService';
 
+const ok = (body: unknown) => ({ status: 200, json: async () => body }) as Response;
+
 describe('PermissionService', () => {
   let originalFetch: typeof globalThis.fetch;
 
@@ -13,72 +15,92 @@ describe('PermissionService', () => {
     globalThis.fetch = originalFetch;
   });
 
-  it('should return allowed true and serverId for a permitted user (200 OK)', async () => {
-    mock.method(globalThis, 'fetch', async () => {
-      return {
-        status: 200,
-        json: async () => ({ can_send: true, server_id: 'srv-123' }),
-      } as Response;
+  it('calls /access with the channel and user', async () => {
+    let calledUrl = '';
+    mock.method(globalThis, 'fetch', async (url: string | URL | Request) => {
+      calledUrl = url.toString();
+      return ok({ server_id: 'srv-1', can_send: true, muted_until: null });
     });
 
-    const result = await PermissionService.canSendMessage('valid-user', 'channel-1');
+    await PermissionService.getChannelAccess('user 1', 'channel-1');
+    assert.match(calledUrl, /\/internal\/channels\/channel-1\/access\?user_id=user\+1$/);
+  });
+
+  it('allows a user who can view and send (200, can_send true)', async () => {
+    mock.method(globalThis, 'fetch', async () => ok({ server_id: 'srv-123', can_send: true, muted_until: null }));
+
+    const result = await PermissionService.getChannelAccess('valid-user', 'channel-1');
+    assert.deepStrictEqual(result, { allowed: true, serverId: 'srv-123', canSend: true, mutedUntil: undefined });
+  });
+
+  it('allows a muted user to view but not send, with the mute expiry', async () => {
+    const expiry = '2030-01-01T00:00:00.000Z';
+    mock.method(globalThis, 'fetch', async () => ok({ server_id: 'srv-1', can_send: false, muted_until: expiry }));
+
+    const result = await PermissionService.getChannelAccess('muted-user', 'channel-1');
     assert.strictEqual(result.allowed, true);
-    assert.strictEqual(result.serverId, 'srv-123');
+    assert.strictEqual(result.canSend, false);
+    assert.strictEqual(result.mutedUntil?.toISOString(), expiry);
   });
 
-  it('should return allowed false for an unauthorized user (403 Forbidden)', async () => {
-    mock.method(globalThis, 'fetch', async () => {
-      return { status: 403 } as Response;
+  it('ignores an invalid muted_until', async () => {
+    mock.method(globalThis, 'fetch', async () => ok({ server_id: 'srv-1', can_send: false, muted_until: 'nope' }));
+
+    const result = await PermissionService.getChannelAccess('muted-user', 'channel-1');
+    assert.strictEqual(result.mutedUntil, undefined);
+  });
+
+  it('assumes the user cannot send when the body does not say so', async () => {
+    mock.method(globalThis, 'fetch', async () => ({ status: 200, json: async () => { throw new Error('no body'); } }) as unknown as Response);
+
+    const result = await PermissionService.getChannelAccess('user-1', 'channel-1');
+    assert.strictEqual(result.allowed, true);
+    assert.strictEqual(result.canSend, false);
+    assert.strictEqual(result.serverId, undefined);
+  });
+
+  it('denies access for a user who cannot view the channel (403)', async () => {
+    mock.method(globalThis, 'fetch', async () => ({ status: 403 }) as Response);
+
+    const result = await PermissionService.getChannelAccess('banned-user', 'channel-1');
+    assert.deepStrictEqual(result, { allowed: false, canSend: false });
+  });
+
+  it('throws if the channel does not exist (404)', async () => {
+    mock.method(globalThis, 'fetch', async () => ({ status: 404 }) as Response);
+
+    await assert.rejects(PermissionService.getChannelAccess('user-1', 'non-existent-channel'), {
+      message: 'Channel not found',
     });
-
-    const result = await PermissionService.canSendMessage('banned-user', 'channel-1');
-    assert.strictEqual(result.allowed, false);
   });
 
-  it('should throw an error if the channel does not exist (404 Not Found)', async () => {
-    mock.method(globalThis, 'fetch', async () => {
-      return { status: 404 } as Response;
+  it('throws if Core returns an unexpected status (500)', async () => {
+    mock.method(globalThis, 'fetch', async () => ({ status: 500 }) as Response);
+
+    await assert.rejects(PermissionService.getChannelAccess('user-1', 'channel-1'), {
+      message: 'Failed to communicate with permission service',
     });
-
-    await assert.rejects(
-      PermissionService.canSendMessage('user-1', 'non-existent-channel'),
-      { message: 'Channel not found' }
-    );
   });
 
-  it('should throw an error if Core service returns unexpected status (500)', async () => {
-    mock.method(globalThis, 'fetch', async () => {
-      return { status: 500 } as Response;
-    });
-
-    await assert.rejects(
-      PermissionService.canSendMessage('user-1', 'channel-1'),
-      { message: 'Failed to communicate with permission service' }
-    );
-  });
-
-  it('should throw an error on network failure (e.g. ECONNREFUSED)', async () => {
+  it('throws on network failure (e.g. ECONNREFUSED)', async () => {
     mock.method(globalThis, 'fetch', async () => {
       throw new Error('fetch failed');
     });
 
-    await assert.rejects(
-      PermissionService.canSendMessage('user-1', 'channel-1'),
-      { message: 'Failed to communicate with permission service' }
-    );
+    await assert.rejects(PermissionService.getChannelAccess('user-1', 'channel-1'), {
+      message: 'Failed to communicate with permission service',
+    });
   });
 
-  it('should throw an error if userId is missing', async () => {
-    await assert.rejects(
-      PermissionService.canSendMessage('', 'channel-1'),
-      { message: 'User ID and Channel ID are required to check permissions' }
-    );
+  it('throws if userId is missing', async () => {
+    await assert.rejects(PermissionService.getChannelAccess('', 'channel-1'), {
+      message: 'User ID and Channel ID are required to check permissions',
+    });
   });
 
-  it('should throw an error if channelId is missing', async () => {
-    await assert.rejects(
-      PermissionService.canSendMessage('user-1', ''),
-      { message: 'User ID and Channel ID are required to check permissions' }
-    );
+  it('throws if channelId is missing', async () => {
+    await assert.rejects(PermissionService.getChannelAccess('user-1', ''), {
+      message: 'User ID and Channel ID are required to check permissions',
+    });
   });
 });
