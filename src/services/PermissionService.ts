@@ -1,26 +1,39 @@
 import { NotFoundError, UpstreamUnavailableError } from '../errors';
 
-export interface PermissionCheckResult {
+export interface ChannelAccessResult {
+  /** Puede ver el canal: abrir el WebSocket y leer el historial. */
   allowed: boolean;
   serverId?: string;
+  /** Puede escribir (SEND_MESSAGES y sin mute vigente). Siempre false si `allowed` es false. */
+  canSend: boolean;
+  /** Cuándo vence el mute, si es lo único que le impide escribir. */
+  mutedUntil?: Date;
+}
+
+interface AccessResponseBody {
+  server_id?: string;
+  can_send?: boolean;
+  muted_until?: string | null;
 }
 
 export class PermissionService {
   /**
-   * Checks if a user is allowed to send messages in a specific channel
-   * by querying the Server-Roles-Core-Service.
+   * Pregunta a Server-Roles qué puede hacer el usuario en el canal
+   * (`GET /internal/channels/{id}/access`).
    *
-   * @returns PermissionCheckResult with allowed status and server ID
-   * @throws NotFoundError if the channel does not exist
-   * @throws UpstreamUnavailableError if Core is unreachable or answers unexpectedly
+   * Ver y escribir son permisos distintos: un usuario muteado puede ver el canal (`allowed: true`)
+   * pero no escribir (`canSend: false`). Si la respuesta no dice que puede escribir, se asume que no.
+   *
+   * @throws NotFoundError si el canal no existe
+   * @throws UpstreamUnavailableError si Server-Roles no responde o responde algo inesperado
    */
-  static async canSendMessage(userId: string, channelId: string): Promise<PermissionCheckResult> {
+  static async getChannelAccess(userId: string, channelId: string): Promise<ChannelAccessResult> {
     if (!userId || !channelId) {
       throw new Error('User ID and Channel ID are required to check permissions');
     }
 
     const coreUrl = process.env.CORE_SERVICE_URL || 'http://localhost:8000';
-    const url = `${coreUrl}/internal/channels/${encodeURIComponent(channelId)}/can-send?${new URLSearchParams({ user_id: userId })}`;
+    const url = `${coreUrl}/internal/channels/${encodeURIComponent(channelId)}/access?${new URLSearchParams({ user_id: userId })}`;
 
     let response: Response;
     try {
@@ -31,17 +44,22 @@ export class PermissionService {
 
     switch (response.status) {
       case 200: {
-        let serverId: string | undefined;
+        let body: AccessResponseBody | null = null;
         try {
-          const body = (await response.json()) as { server_id?: string } | null;
-          serverId = body?.server_id;
+          body = (await response.json()) as AccessResponseBody | null;
         } catch {
-          serverId = undefined;
+          body = null;
         }
-        return { allowed: true, serverId };
+        const mutedUntil = body?.muted_until ? new Date(body.muted_until) : undefined;
+        return {
+          allowed: true,
+          serverId: body?.server_id,
+          canSend: body?.can_send === true,
+          mutedUntil: mutedUntil && !Number.isNaN(mutedUntil.getTime()) ? mutedUntil : undefined,
+        };
       }
       case 403:
-        return { allowed: false };
+        return { allowed: false, canSend: false };
       case 404:
         throw new NotFoundError('Channel not found');
       default:

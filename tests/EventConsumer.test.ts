@@ -188,6 +188,40 @@ describe('EventConsumer', () => {
     assert.strictEqual(EventConsumer.pendingMuteCount, 0);
   });
 
+  it('keeps a mute longer than the setTimeout limit (~24.8 days) instead of lifting it at once', async () => {
+    const ws = createMockSocket();
+    SessionManager.register({
+      userId: 'long-mute-user',
+      channelId: 'chan-1',
+      serverId: 'srv-1',
+      socket: ws,
+      canSend: true,
+      connectedAt: new Date(),
+    });
+
+    const thirtyDays = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+    EventConsumer.handleEvent('member.muted', { server_id: 'srv-1', user_id: 'long-mute-user', expires_at: thirtyDays });
+
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    assert.strictEqual(SessionManager.canSend(ws), false);
+    assert.strictEqual(EventConsumer.pendingMuteCount, 1);
+  });
+
+  it('scheduleMuteExpiry enables the sessions of that user on that server only', async () => {
+    const wsSrv1 = createMockSocket();
+    const wsSrv2 = createMockSocket();
+    SessionManager.register({ userId: 'u-sched', channelId: 'c1', serverId: 'srv-1', socket: wsSrv1, canSend: false, connectedAt: new Date() });
+    SessionManager.register({ userId: 'u-sched', channelId: 'c2', serverId: 'srv-2', socket: wsSrv2, canSend: false, connectedAt: new Date() });
+
+    EventConsumer.scheduleMuteExpiry('u-sched', 'srv-1', 20);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    assert.strictEqual(SessionManager.canSend(wsSrv1), true);
+    assert.strictEqual(SessionManager.canSend(wsSrv2), false);
+    assert.strictEqual(EventConsumer.pendingMuteCount, 0);
+  });
+
   it('ignores events with missing payload or user_id', () => {
     assert.doesNotThrow(() => {
       EventConsumer.handleEvent('member.banned', {} as EventPayload);

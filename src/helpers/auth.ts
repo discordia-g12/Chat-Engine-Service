@@ -1,5 +1,5 @@
 import { FastifyRequest } from 'fastify';
-import { PermissionService } from '../services/PermissionService';
+import { PermissionService, ChannelAccessResult } from '../services/PermissionService';
 import { ForbiddenError, UnauthorizedError } from '../errors';
 
 declare module 'fastify' {
@@ -8,6 +8,10 @@ declare module 'fastify' {
     userId: string;
     /** Server that owns the requested channel, resolved during access validation. */
     serverId?: string;
+    /** Whether the caller can write in the channel (they can always read once the guard passes). */
+    canSend?: boolean;
+    /** When the caller's mute expires, if the mute is the only thing preventing them from writing. */
+    mutedUntil?: Date;
   }
 }
 
@@ -27,12 +31,13 @@ export function requireAuth(req: FastifyRequest): string {
   return userId;
 }
 
-export async function requireChannelAccess(userId: string, channelId: string): Promise<string | undefined> {
-  const result = await PermissionService.canSendMessage(userId, channelId);
+/** Exige permiso de VER el canal. Que pueda escribir viene en el resultado (`canSend`). */
+export async function requireChannelAccess(userId: string, channelId: string): Promise<ChannelAccessResult> {
+  const result = await PermissionService.getChannelAccess(userId, channelId);
   if (!result.allowed) {
     throw new ForbiddenError('User does not have permission to access this channel');
   }
-  return result.serverId;
+  return result;
 }
 
 /**
@@ -45,7 +50,9 @@ export async function requireChannelAccess(userId: string, channelId: string): P
 export async function channelAccessGuard(req: FastifyRequest): Promise<void> {
   const { channelId } = req.params as { channelId: string };
   const userId = requireAuth(req);
-  const serverId = await requireChannelAccess(userId, channelId);
+  const access = await requireChannelAccess(userId, channelId);
   req.userId = userId;
-  req.serverId = serverId;
+  req.serverId = access.serverId;
+  req.canSend = access.canSend;
+  req.mutedUntil = access.mutedUntil;
 }

@@ -13,6 +13,7 @@ export interface EventPayload {
 
 const RECONNECT_BASE_MS = 1000;
 const RECONNECT_MAX_MS = 30_000;
+const MAX_TIMEOUT_MS = 2 ** 31 - 1;
 
 /** Logger mínimo, con las dos firmas del de Fastify (app.log) para que sea asignable. */
 export interface ConsumerLogger {
@@ -51,13 +52,29 @@ export class EventConsumer {
     return `${userId}:${serverId || '*'}`;
   }
 
-  private static scheduleMuteExpiry(userId: string, serverId: string | undefined, delayMs: number): void {
-    const key = this.muteKey(userId, serverId);
+  /**
+   * Habilita la escritura de las sesiones del usuario en ese servidor cuando vence el mute. Lo usan
+   * `member.muted` y la apertura del WebSocket de alguien que ya estaba muteado (así un mute que vence
+   * después de un reinicio del chat se levanta igual). Reemplaza un timer anterior del mismo usuario y servidor.
+   */
+  static scheduleMuteExpiry(userId: string, serverId: string | undefined, delayMs: number): void {
     this.clearMuteExpiry(userId, serverId);
+    this.armMuteTimer(userId, serverId, Date.now() + delayMs);
+  }
+
+  private static armMuteTimer(userId: string, serverId: string | undefined, expiresAtMs: number): void {
+    const key = this.muteKey(userId, serverId);
+    const remaining = Math.max(expiresAtMs - Date.now(), 0);
+    // setTimeout no acepta más de ~24,8 días: con un valor mayor se dispara enseguida. Un mute más largo
+    // se espera por tramos.
     const timer = setTimeout(() => {
+      if (remaining > MAX_TIMEOUT_MS) {
+        this.armMuteTimer(userId, serverId, expiresAtMs);
+        return;
+      }
       SessionManager.updateUserPermission(userId, true, undefined, serverId);
       this.muteTimers.delete(key);
-    }, delayMs);
+    }, Math.min(remaining, MAX_TIMEOUT_MS));
     timer.unref();
     this.muteTimers.set(key, timer);
   }

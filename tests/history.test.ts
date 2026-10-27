@@ -28,7 +28,9 @@ describe('History and Reconnection', () => {
       if (urlStr.includes('core-down-user')) {
         throw new Error('fetch failed');
       }
-      return { status: 200 } as Response;
+      // Muteado: puede ver el canal aunque no pueda escribir
+      const canSend = !urlStr.includes('muted-user');
+      return { status: 200, json: async () => ({ server_id: 'srv-1', can_send: canSend, muted_until: null }) } as Response;
     });
 
     mongoServer = await MongoMemoryServer.create();
@@ -78,6 +80,17 @@ describe('History and Reconnection', () => {
 
     assert.strictEqual(res.statusCode, 403);
     assert.strictEqual(res.json().title, 'Forbidden');
+  });
+
+  it('Should let a muted user read the history', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: `/channels/${channelId}/messages?limit=10`,
+      headers: { 'x-user-id': 'muted-user' }
+    });
+
+    assert.strictEqual(res.statusCode, 200);
+    assert.strictEqual(res.json().messages.length, 10);
   });
 
   it('Should return 404 if channel not found', async () => {
