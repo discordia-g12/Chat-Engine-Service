@@ -15,6 +15,9 @@ export interface EventPayload {
 const RECONNECT_BASE_MS = 1000;
 const RECONNECT_MAX_MS = 30_000;
 const MAX_TIMEOUT_MS = 2 ** 31 - 1;
+// Si al vencer un mute Server-Roles todavía lo informa (el timer se disparó apenas antes, o los relojes
+// no coinciden), se vuelve a probar en su vencimiento más este margen
+const MUTE_RECHECK_MARGIN_MS = 1000;
 
 /** Logger mínimo, con las dos firmas del de Fastify (app.log) para que sea asignable. */
 export interface ConsumerLogger {
@@ -118,7 +121,13 @@ export class EventConsumer {
         const { userId, channelId } = group[0];
         let canSend: boolean | undefined;
         try {
-          canSend = (await PermissionService.getChannelAccess(userId, channelId)).canSend;
+          const access = await PermissionService.getChannelAccess(userId, channelId);
+          canSend = access.canSend;
+          // Sigue muteado (p. ej. el timer del vencimiento se adelantó): volver a probar cuando venza
+          if (access.mutedUntil) {
+            const delayMs = Math.max(access.mutedUntil.getTime() - Date.now(), 0) + MUTE_RECHECK_MARGIN_MS;
+            this.scheduleMuteExpiry(userId, group[0].serverId || undefined, delayMs);
+          }
         } catch (err) {
           (this.options?.logger ?? console).warn({ err, userId, channelId }, 'Could not re-check send permission');
           canSend = fallback;
