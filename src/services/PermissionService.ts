@@ -68,4 +68,43 @@ export class PermissionService {
         });
     }
   }
+
+  /**
+   * Canales de texto que el usuario puede ver en todos sus servidores
+   * (`GET /internal/users/{id}/visible-channels`). Los no leídos se calculan solo sobre estos, así no se
+   * confía en la lista que mande el cliente.
+   *
+   * @throws UpstreamUnavailableError si Server-Roles no responde o responde algo inesperado
+   */
+  static async getVisibleChannels(userId: string): Promise<string[]> {
+    if (!userId) {
+      throw new Error('User ID is required to list visible channels');
+    }
+
+    const coreUrl = process.env.CORE_SERVICE_URL || 'http://localhost:8000';
+    const url = `${coreUrl}/internal/users/${encodeURIComponent(userId)}/visible-channels`;
+
+    let response: Response;
+    try {
+      response = await fetch(url);
+    } catch (cause) {
+      throw new UpstreamUnavailableError('Failed to communicate with permission service', { cause });
+    }
+
+    let body: { channel_ids?: unknown } | null = null;
+    if (response.status === 200) {
+      try {
+        body = (await response.json()) as { channel_ids?: unknown } | null;
+      } catch {
+        body = null;
+      }
+    }
+    const channelIds = body?.channel_ids;
+    if (!Array.isArray(channelIds) || !channelIds.every((id) => typeof id === 'string')) {
+      throw new UpstreamUnavailableError('Failed to communicate with permission service', {
+        cause: new Error(`Core service returned an unexpected visible-channels response (status ${response.status})`),
+      });
+    }
+    return channelIds;
+  }
 }

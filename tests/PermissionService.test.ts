@@ -103,4 +103,40 @@ describe('PermissionService', () => {
       message: 'User ID and Channel ID are required to check permissions',
     });
   });
+
+  describe('getVisibleChannels', () => {
+    it('calls /visible-channels and returns the channel ids', async () => {
+      let calledUrl = '';
+      mock.method(globalThis, 'fetch', async (url: string | URL | Request) => {
+        calledUrl = url.toString();
+        return ok({ channel_ids: ['c1', 'c2'] });
+      });
+
+      assert.deepStrictEqual(await PermissionService.getVisibleChannels('user 1'), ['c1', 'c2']);
+      assert.match(calledUrl, /\/internal\/users\/user%201\/visible-channels$/);
+    });
+
+    it('fails as unavailable when Core cannot be reached', async () => {
+      mock.method(globalThis, 'fetch', async () => {
+        throw new Error('fetch failed');
+      });
+
+      await assert.rejects(PermissionService.getVisibleChannels('user-1'), { name: 'UpstreamUnavailableError' });
+    });
+
+    it('fails as unavailable on an unexpected status or body', async () => {
+      mock.method(globalThis, 'fetch', async () => ({ status: 500 }) as Response);
+      await assert.rejects(PermissionService.getVisibleChannels('user-1'), { name: 'UpstreamUnavailableError' });
+
+      mock.method(globalThis, 'fetch', async () => ok({ channel_ids: [1, 2] }));
+      await assert.rejects(PermissionService.getVisibleChannels('user-1'), { name: 'UpstreamUnavailableError' });
+
+      mock.method(globalThis, 'fetch', async () => ({ status: 200, json: async () => { throw new Error('no body'); } }) as unknown as Response);
+      await assert.rejects(PermissionService.getVisibleChannels('user-1'), { name: 'UpstreamUnavailableError' });
+    });
+
+    it('requires a user id', async () => {
+      await assert.rejects(PermissionService.getVisibleChannels(''), /User ID is required/);
+    });
+  });
 });
