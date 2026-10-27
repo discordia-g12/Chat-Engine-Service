@@ -1,5 +1,6 @@
 import type { Channel, ChannelModel, ConsumeMessage } from 'amqplib';
-import { SessionManager } from './SessionManager';
+import { PermissionService } from './PermissionService';
+import { SessionManager, type ClientSession } from './SessionManager';
 
 export interface EventPayload {
   server_id?: string;
@@ -53,7 +54,7 @@ export class EventConsumer {
   }
 
   /**
-   * Habilita la escritura de las sesiones del usuario en ese servidor cuando vence el mute. Lo usan
+   * Vuelve a evaluar la escritura de las sesiones del usuario en ese servidor cuando vence el mute. Lo usan
    * `member.muted` y la apertura del WebSocket de alguien que ya estaba muteado (así un mute que vence
    * después de un reinicio del chat se levanta igual). Reemplaza un timer anterior del mismo usuario y servidor.
    */
@@ -72,8 +73,9 @@ export class EventConsumer {
         this.armMuteTimer(userId, serverId, expiresAtMs);
         return;
       }
-      SessionManager.updateUserPermission(userId, true, undefined, serverId);
       this.muteTimers.delete(key);
+      // Venció el mute: puede volver a escribir si su rol se lo permite
+      void this.recheckSendPermission(SessionManager.getUserSessions(userId, serverId), true);
     }, Math.min(remaining, MAX_TIMEOUT_MS));
     timer.unref();
     this.muteTimers.set(key, timer);
@@ -99,13 +101,51 @@ export class EventConsumer {
     return this.muteTimers.size;
   }
 
-  static handleEvent(routingKey: string, payload: EventPayload): void {
-    if (!payload || !payload.user_id) {
+  /**
+   * Vuelve a preguntar a Server-Roles si cada sesión puede escribir (SEND_MESSAGES, overrides del canal y
+   * mute) y avisa a las que cambiaron. Una consulta por usuario y canal, aunque tenga varias pestañas.
+   * Si Server-Roles no responde, las sesiones quedan como estaban, salvo que se pase `fallback`.
+   */
+  static async recheckSendPermission(sessions: ClientSession[], fallback?: boolean): Promise<void> {
+    const groups = new Map<string, ClientSession[]>();
+    for (const session of sessions) {
+      const key = `${session.userId}\u0000${session.channelId}`;
+      groups.set(key, [...(groups.get(key) ?? []), session]);
+    }
+
+    await Promise.all(
+      Array.from(groups.values()).map(async (group) => {
+        const { userId, channelId } = group[0];
+        let canSend: boolean | undefined;
+        try {
+          canSend = (await PermissionService.getChannelAccess(userId, channelId)).canSend;
+        } catch (err) {
+          (this.options?.logger ?? console).warn({ err, userId, channelId }, 'Could not re-check send permission');
+          canSend = fallback;
+        }
+        if (canSend === undefined) return;
+        for (const session of group) SessionManager.setCanSend(session, canSend);
+      })
+    );
+  }
+
+  static async handleEvent(routingKey: string, payload: EventPayload): Promise<void> {
+    if (!payload) {
       return;
     }
 
     const userId = payload.user_id;
     const serverId = payload.server_id;
+
+    // Cambió lo que puede hacer un rol (o se borró): afecta a todos los que lo tengan en el servidor
+    if (routingKey === 'role.permissions_updated' || routingKey === 'role.deleted') {
+      if (serverId) await this.recheckSendPermission(SessionManager.getServerSessions(serverId));
+      return;
+    }
+
+    if (!userId) {
+      return;
+    }
 
     switch (routingKey) {
       case 'member.banned':
@@ -132,8 +172,15 @@ export class EventConsumer {
         break;
 
       case 'member.unmuted':
-        SessionManager.updateUserPermission(userId, true, undefined, serverId);
+        // Sin mute no alcanza: si su rol no tiene SEND_MESSAGES sigue sin poder escribir. Si Server-Roles
+        // no responde, se habilita como antes (el envío se vuelve a chequear al reconectar)
         this.clearMuteExpiry(userId, serverId);
+        await this.recheckSendPermission(SessionManager.getUserSessions(userId, serverId), true);
+        break;
+
+      case 'member.role_assigned':
+      case 'member.role_removed':
+        await this.recheckSendPermission(SessionManager.getUserSessions(userId, serverId));
         break;
 
       default:
@@ -142,7 +189,7 @@ export class EventConsumer {
   }
 
   /**
-   * Conecta a RabbitMQ y consume los eventos member.* de Server-Roles. No bloquea: el chat arranca
+   * Conecta a RabbitMQ y consume los eventos member.* y role.* de Server-Roles. No bloquea: el chat arranca
    * aunque RabbitMQ (otro nodo) esté caído, y se reintenta para siempre con backoff exponencial.
    * Si la conexión se cae después, vuelve a conectar sola.
    *
@@ -213,12 +260,16 @@ export class EventConsumer {
       await channel.assertExchange(opts.exchange, 'topic', { durable: true });
       const q = await channel.assertQueue(opts.queue, { durable: true });
       await channel.bindQueue(q.queue, opts.exchange, 'member.*');
+      // Cambios de permisos de un rol: hay que volver a evaluar quién puede escribir
+      await channel.bindQueue(q.queue, opts.exchange, 'role.*');
 
       await channel.consume(q.queue, (msg: ConsumeMessage | null) => {
         if (!msg) return;
         try {
           const payload = JSON.parse(msg.content.toString());
-          this.handleEvent(msg.fields.routingKey, payload);
+          this.handleEvent(msg.fields.routingKey, payload).catch((err) =>
+            opts.logger.error({ err, routingKey: msg.fields.routingKey }, 'Failed to handle event')
+          );
           channel.ack(msg);
         } catch (err) {
           // Mensaje mal formado: no se reencola (se volvería a romper en loop)

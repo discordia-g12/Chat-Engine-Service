@@ -74,6 +74,20 @@ export class SessionManager {
     return sessions;
   }
 
+  /** Sesiones abiertas en canales de ese servidor (de todos los usuarios). */
+  static getServerSessions(serverId: string): ClientSession[] {
+    return Array.from(this.socketSessions.values()).filter((s) => s.serverId === serverId);
+  }
+
+  /** Cambia si la sesión puede escribir y, solo si cambió, se lo avisa al cliente (PERMISSIONS_UPDATED). */
+  static setCanSend(session: ClientSession, canSend: boolean): void {
+    if (session.canSend === canSend) return;
+    session.canSend = canSend;
+    if (session.socket.readyState === 1) {
+      session.socket.send(JSON.stringify({ type: 'PERMISSIONS_UPDATED', canSend, channelId: session.channelId }));
+    }
+  }
+
   static canSend(socket: WebSocket): boolean {
     return this.socketSessions.get(socket)?.canSend ?? false;
   }
