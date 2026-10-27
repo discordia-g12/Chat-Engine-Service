@@ -327,6 +327,18 @@ describe('EventConsumer', () => {
     assert.strictEqual(SessionManager.canSend(ws), true);
   });
 
+  it('when the mute expiry fires but Server-Roles still reports the mute, schedules it again', async () => {
+    // El timer se adelantó: Server-Roles todavía lo informa muteado por un instante más
+    const mutedUntil = new Date(Date.now() + 5);
+    mock.method(PermissionService, 'getChannelAccess', async () => ({ allowed: true, canSend: false, mutedUntil }));
+    const ws = register('u-early', 'chan-1', 'srv-1', false);
+
+    await EventConsumer.handleEvent('member.unmuted', { server_id: 'srv-1', user_id: 'u-early' });
+
+    assert.strictEqual(SessionManager.canSend(ws), false);
+    assert.strictEqual(EventConsumer.pendingMuteCount, 1);
+  });
+
   it('ignores events with missing payload or user_id', async () => {
     await EventConsumer.handleEvent('member.banned', {} as EventPayload);
     await EventConsumer.handleEvent('unknown.event', { user_id: 'u1' });
