@@ -1,6 +1,7 @@
-import { describe, it, beforeEach, afterEach } from 'node:test';
+import { describe, it, beforeEach, afterEach, mock } from 'node:test';
 import assert from 'node:assert';
-import { EventConsumer } from '../src/services/EventConsumer';
+import { EventConsumer, type EventPayload } from '../src/services/EventConsumer';
+import { PermissionService } from '../src/services/PermissionService';
 import { SessionManager } from '../src/services/SessionManager';
 import type { WebSocket } from 'ws';
 
@@ -29,7 +30,25 @@ describe('EventConsumer', () => {
 
   afterEach(() => {
     EventConsumer.clearAllTimers();
+    mock.restoreAll();
   });
+
+  /** Server-Roles responde si puede escribir (por usuario y canal); sin respuesta para el par, puede. */
+  function mockAccess(canSendFor: (userId: string, channelId: string) => boolean = () => true) {
+    return mock.method(PermissionService, 'getChannelAccess', async (userId: string, channelId: string) => ({
+      allowed: true,
+      canSend: canSendFor(userId, channelId),
+    }));
+  }
+
+  const register = (userId: string, channelId: string, serverId: string, canSend: boolean) => {
+    const socket = createMockSocket();
+    SessionManager.register({ userId, channelId, serverId, socket, canSend, connectedAt: new Date() });
+    return socket;
+  };
+
+  const sent = (socket: WebSocket) =>
+    ((socket as unknown as { _sentMessages: string[] })._sentMessages).map((m) => JSON.parse(m));
 
   it('handles member.banned by disconnecting active user sessions on that server with 4003', () => {
     const ws1 = createMockSocket();
@@ -133,6 +152,7 @@ describe('EventConsumer', () => {
   });
 
   it('handles temporary member.muted with expires_at by auto-unmuting after expiry', async () => {
+    mockAccess();
     const ws = createMockSocket();
     SessionManager.register({
       userId: 'temp-mute-user',
@@ -159,7 +179,8 @@ describe('EventConsumer', () => {
     assert.strictEqual(EventConsumer.pendingMuteCount, 0);
   });
 
-  it('handles member.unmuted by restoring send permission and clearing timer', () => {
+  it('handles member.unmuted by restoring send permission and clearing timer', async () => {
+    mockAccess();
     const ws = createMockSocket();
     SessionManager.register({
       userId: 'reformed-user',
@@ -179,7 +200,7 @@ describe('EventConsumer', () => {
 
     assert.strictEqual(EventConsumer.pendingMuteCount, 1);
 
-    EventConsumer.handleEvent('member.unmuted', {
+    await EventConsumer.handleEvent('member.unmuted', {
       server_id: 'srv-1',
       user_id: 'reformed-user',
     });
@@ -209,6 +230,7 @@ describe('EventConsumer', () => {
   });
 
   it('scheduleMuteExpiry enables the sessions of that user on that server only', async () => {
+    mockAccess();
     const wsSrv1 = createMockSocket();
     const wsSrv2 = createMockSocket();
     SessionManager.register({ userId: 'u-sched', channelId: 'c1', serverId: 'srv-1', socket: wsSrv1, canSend: false, connectedAt: new Date() });
@@ -222,10 +244,104 @@ describe('EventConsumer', () => {
     assert.strictEqual(EventConsumer.pendingMuteCount, 0);
   });
 
-  it('ignores events with missing payload or user_id', () => {
-    assert.doesNotThrow(() => {
-      EventConsumer.handleEvent('member.banned', {} as EventPayload);
-      EventConsumer.handleEvent('unknown.event', { user_id: 'u1' });
+  it('member.unmuted keeps the user blocked if their role has no SEND_MESSAGES', async () => {
+    mockAccess(() => false);
+    const ws = register('no-send-user', 'chan-1', 'srv-1', false);
+
+    await EventConsumer.handleEvent('member.unmuted', { server_id: 'srv-1', user_id: 'no-send-user' });
+
+    assert.strictEqual(SessionManager.canSend(ws), false);
+    assert.deepStrictEqual(sent(ws), []);
+  });
+
+  it('member.unmuted falls back to enabling the user if Server-Roles does not answer', async () => {
+    mock.method(PermissionService, 'getChannelAccess', async () => {
+      throw new Error('down');
     });
+    const ws = register('fallback-user', 'chan-1', 'srv-1', false);
+
+    await EventConsumer.handleEvent('member.unmuted', { server_id: 'srv-1', user_id: 'fallback-user' });
+
+    assert.strictEqual(SessionManager.canSend(ws), true);
+  });
+
+  it('role.permissions_updated re-checks every session on that server and notifies only the ones that changed', async () => {
+    // El rol perdió SEND_MESSAGES: a u-a le cambia, a u-b (que ya no podía) no
+    const access = mockAccess(() => false);
+    const wsA = register('u-a', 'chan-1', 'srv-roles', true);
+    const wsB = register('u-b', 'chan-1', 'srv-roles', false);
+    const wsOther = register('u-c', 'chan-9', 'srv-other', true);
+
+    await EventConsumer.handleEvent('role.permissions_updated', { server_id: 'srv-roles', role_id: 'r1', permissions_bitmask: 0 });
+
+    assert.strictEqual(SessionManager.canSend(wsA), false);
+    assert.deepStrictEqual(sent(wsA), [{ type: 'PERMISSIONS_UPDATED', canSend: false, channelId: 'chan-1' }]);
+    assert.deepStrictEqual(sent(wsB), []);
+    assert.strictEqual(SessionManager.canSend(wsOther), true);
+    assert.strictEqual(access.mock.callCount(), 2);
+  });
+
+  it('role.deleted re-checks the server sessions too', async () => {
+    mockAccess(() => false);
+    const ws = register('u-del', 'chan-1', 'srv-del', true);
+
+    await EventConsumer.handleEvent('role.deleted', { server_id: 'srv-del', role_id: 'r1' });
+
+    assert.strictEqual(SessionManager.canSend(ws), false);
+  });
+
+  it('member.role_assigned re-checks only that user on that server and can enable writing', async () => {
+    mockAccess((userId) => userId === 'u-new-role');
+    const ws = register('u-new-role', 'chan-1', 'srv-1', false);
+    const wsOtherServer = register('u-new-role', 'chan-2', 'srv-2', false);
+    const wsOtherUser = register('u-x', 'chan-1', 'srv-1', false);
+
+    await EventConsumer.handleEvent('member.role_assigned', { server_id: 'srv-1', user_id: 'u-new-role', role_id: 'r1' });
+
+    assert.strictEqual(SessionManager.canSend(ws), true);
+    assert.deepStrictEqual(sent(ws), [{ type: 'PERMISSIONS_UPDATED', canSend: true, channelId: 'chan-1' }]);
+    assert.strictEqual(SessionManager.canSend(wsOtherServer), false);
+    assert.strictEqual(SessionManager.canSend(wsOtherUser), false);
+  });
+
+  it('member.role_removed can block writing, asking once per user and channel', async () => {
+    const access = mockAccess(() => false);
+    const tab1 = register('u-two-tabs', 'chan-1', 'srv-1', true);
+    const tab2 = register('u-two-tabs', 'chan-1', 'srv-1', true);
+
+    await EventConsumer.handleEvent('member.role_removed', { server_id: 'srv-1', user_id: 'u-two-tabs', role_id: 'r1' });
+
+    assert.strictEqual(SessionManager.canSend(tab1), false);
+    assert.strictEqual(SessionManager.canSend(tab2), false);
+    assert.strictEqual(access.mock.callCount(), 1);
+  });
+
+  it('a role change leaves sessions as they were if Server-Roles does not answer', async () => {
+    mock.method(PermissionService, 'getChannelAccess', async () => {
+      throw new Error('down');
+    });
+    const ws = register('u-down', 'chan-1', 'srv-down', true);
+
+    await EventConsumer.handleEvent('role.permissions_updated', { server_id: 'srv-down', role_id: 'r1' });
+
+    assert.strictEqual(SessionManager.canSend(ws), true);
+  });
+
+  it('when the mute expiry fires but Server-Roles still reports the mute, schedules it again', async () => {
+    // El timer se adelantó: Server-Roles todavía lo informa muteado por un instante más
+    const mutedUntil = new Date(Date.now() + 5);
+    mock.method(PermissionService, 'getChannelAccess', async () => ({ allowed: true, canSend: false, mutedUntil }));
+    const ws = register('u-early', 'chan-1', 'srv-1', false);
+
+    await EventConsumer.handleEvent('member.unmuted', { server_id: 'srv-1', user_id: 'u-early' });
+
+    assert.strictEqual(SessionManager.canSend(ws), false);
+    assert.strictEqual(EventConsumer.pendingMuteCount, 1);
+  });
+
+  it('ignores events with missing payload or user_id', async () => {
+    await EventConsumer.handleEvent('member.banned', {} as EventPayload);
+    await EventConsumer.handleEvent('unknown.event', { user_id: 'u1' });
+    await EventConsumer.handleEvent('role.permissions_updated', {});
   });
 });

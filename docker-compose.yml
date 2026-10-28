@@ -6,7 +6,7 @@ services:
     container_name: chat-engine-mongo
     restart: unless-stopped
     ports:
-      - "27017"
+      - "27017:27017"
     volumes:
       - mongo-data:/data/db
     healthcheck:
@@ -21,7 +21,7 @@ services:
     container_name: chat-engine-redis
     restart: unless-stopped
     ports:
-      - "6379"
+      - "6379:6379"
     volumes:
       - redis-data:/data
     healthcheck:
@@ -38,11 +38,12 @@ services:
     container_name: chat-engine-service
     restart: unless-stopped
     ports:
-      - "3000"
+      - "3000:3000"
     environment:
       - PORT=3000
       - MONGO_URI=mongodb://chat-mongo:27017/chat_db
       - REDIS_URL=redis://chat-redis:6379
+      - CORE_SERVICE_URL=${CORE_SERVICE_URL:-http://host.docker.internal:8080}
     depends_on:
       chat-mongo:
         condition: service_healthy

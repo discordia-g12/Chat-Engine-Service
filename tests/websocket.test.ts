@@ -12,6 +12,7 @@ describe('WebSocket Endpoints', () => {
   let port: number;
 
   let originalFetch: typeof globalThis.fetch;
+  let tempMuteEndsAt: number | undefined;
 
   before(async () => {
     originalFetch = globalThis.fetch;
@@ -28,8 +29,11 @@ describe('WebSocket Endpoints', () => {
         throw new Error('fetch failed');
       }
       if (urlStr.includes('temp-muted-user')) {
-        // Muteado por poco tiempo: puede leer, y el chat lo habilita solo al vencer el mute
-        return access({ can_send: false, muted_until: new Date(Date.now() + 200).toISOString() });
+        // Muteado por poco tiempo: puede leer, y el chat lo habilita solo al vencer el mute (al vencer
+        // vuelve a preguntar, y Server-Roles ya no lo informa muteado)
+        tempMuteEndsAt ??= Date.now() + 200;
+        if (Date.now() >= tempMuteEndsAt) return access({ can_send: true, muted_until: null });
+        return access({ can_send: false, muted_until: new Date(tempMuteEndsAt).toISOString() });
       }
       if (urlStr.includes('muted-user')) {
         return access({ can_send: false, muted_until: null });

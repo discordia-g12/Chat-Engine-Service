@@ -1,6 +1,7 @@
-import { describe, it, beforeEach } from 'node:test';
+import { describe, it, beforeEach, mock } from 'node:test';
 import assert from 'node:assert';
 import { EventConsumer } from '../src/services/EventConsumer';
+import { PermissionService } from '../src/services/PermissionService';
 import { SessionManager } from '../src/services/SessionManager';
 import { ForbiddenError } from '../src/errors';
 import type { WebSocket } from 'ws';
@@ -117,10 +118,13 @@ describe('Event-Driven WebSocket Lifecycle Integration', () => {
       }
     );
 
-    EventConsumer.handleEvent('member.unmuted', {
+    // Al quitar el mute se vuelve a preguntar a Server-Roles: su rol le permite escribir
+    const access = mock.method(PermissionService, 'getChannelAccess', async () => ({ allowed: true, canSend: true }));
+    await EventConsumer.handleEvent('member.unmuted', {
       server_id: 'srv-1',
       user_id: 'alice',
     });
+    access.mock.restore();
 
     await assert.doesNotReject(async () => {
       await simulateClientSendMessage(wsAlice, 'alice', 'chan-1', 'Message after unmute');
