@@ -11,8 +11,17 @@ export interface ChannelUnread {
   channelId: string;
   /** Mensajes de otros sin leer, hasta UNREAD_COUNT_CAP. */
   unreadCount: number;
-  /** Menciones sin leer. Siempre 0 hasta que existan las menciones (historia #46). */
+  /** Mensajes sin leer que mencionan al usuario (directo, a uno de sus roles o @everyone), con el mismo tope. */
   mentionCount: number;
+}
+
+/** Los mensajes que mencionan al usuario: a él, a @everyone o a alguno de sus roles. */
+function mentionsOf(userId: string, roleIds: string[]) {
+  return [
+    { mentionUserIds: userId },
+    { mentionEveryone: true },
+    ...(roleIds.length > 0 ? [{ mentionRoleIds: { $in: roleIds } }] : []),
+  ];
 }
 
 /** Un _id que queda después de todo lo enviado hasta ahora (y antes de lo que se envíe después). */
@@ -49,7 +58,7 @@ export class ReadStateService {
    * toma como leído hasta ahora: si no, quien entra a un servidor vería todo el historial como no leído.
    */
   static async getUnread(userId: string): Promise<ChannelUnread[]> {
-    const channelIds = await PermissionService.getVisibleChannels(userId);
+    const { channelIds, roleIds } = await PermissionService.getVisibleChannels(userId);
     if (channelIds.length === 0) return [];
 
     const states = await ReadState.find({ userId, channelId: { $in: channelIds } }).lean();
@@ -75,15 +84,20 @@ export class ReadStateService {
       baselines.forEach(({ channelId, messageId }) => lastRead.set(channelId, messageId));
     }
 
+    // Las menciones son un subconjunto de lo no leído: solo se cuentan en los canales con algo sin leer
     const counts = await Promise.all(
-      channelIds.map(async (channelId) => ({
-        channelId,
-        unreadCount: await Message.countDocuments(
-          { channelId, _id: { $gt: lastRead.get(channelId) }, authorId: { $ne: userId } },
-          { limit: UNREAD_COUNT_CAP }
-        ),
-        mentionCount: 0,
-      }))
+      channelIds.map(async (channelId) => {
+        const unread = { channelId, _id: { $gt: lastRead.get(channelId) }, authorId: { $ne: userId } };
+        const unreadCount = await Message.countDocuments(unread, { limit: UNREAD_COUNT_CAP });
+        const mentionCount =
+          unreadCount === 0
+            ? 0
+            : await Message.countDocuments(
+                { ...unread, $or: mentionsOf(userId, roleIds) },
+                { limit: UNREAD_COUNT_CAP }
+              );
+        return { channelId, unreadCount, mentionCount };
+      })
     );
     return counts.filter((c) => c.unreadCount > 0);
   }
@@ -114,7 +128,7 @@ export class ReadStateService {
 
   /** Marca como leídos todos los canales que el usuario puede ver. */
   static async markAllRead(userId: string): Promise<void> {
-    const channelIds = await PermissionService.getVisibleChannels(userId);
+    const { channelIds } = await PermissionService.getVisibleChannels(userId);
     const reads = await Promise.all(
       channelIds.map(async (channelId) => ({
         channelId,

@@ -27,7 +27,7 @@ Hay tres restricciones que condicionan el diseño:
 * **Los canales visibles los decide Core**, no el cliente: `GET /unread` y `POST /read-states/read-all` llaman a `GET /internal/users/{id}/visible-channels` de Server-Roles-Core (canales de texto con `VIEW_CHANNELS` en todos los servidores del usuario). Es una **llamada sincrónica**, justificada como la de `/access`: la respuesta al usuario depende de ella y no se puede construir sin saber qué puede ver. Si Core no responde, `503` (`UpstreamUnavailableError`), igual que el historial.
 * **Índice nuevo en `messages`:** `{ channelId: 1, _id: 1 }`. El conteo filtra por canal y `_id > lastReadMessageId`; con este índice Mongo va directo a ese tramo y cuenta como mucho 100 documentos. El índice existente (`{ channelId: 1, createdAt: -1 }`) obligaría a revisar todos los mensajes del canal.
 * **Los clientes consultan por polling:** cada 30 s y al volver a la app (`useUnreadQuery` en `@discordia/core`; en mobile, el `focusManager` de React Query atado a `AppState`). El canal abierto se marca leído con cada mensaje que llega por su WebSocket, con un debounce de 1 s, y la interfaz nunca lo muestra como no leído.
-* **`mentionCount` ya está en la respuesta y vale 0** hasta que exista #46: cuando haya menciones, se cuentan los mensajes no leídos que mencionan al usuario, sin cambiar el contrato.
+* **`mentionCount`** quedó en la respuesta desde el principio y se llenó con #46 sin cambiar el contrato: cuenta los mensajes no leídos que mencionan al usuario. Ver ADR-03.
 
 **Alternativas descartadas:**
 

@@ -5,6 +5,10 @@ export interface IMessage extends Document {
   authorId: string;
   channelId: string;
   createdAt: Date;
+  /** Menciones que notifican (#46). Solo se guardan si hay alguna. */
+  mentionUserIds?: string[];
+  mentionRoleIds?: string[];
+  mentionEveryone?: boolean;
 }
 
 const MessageSchema: Schema = new Schema({
@@ -34,7 +38,10 @@ const MessageSchema: Schema = new Schema({
   createdAt: {
     type: Date,
     default: Date.now
-  }
+  },
+  mentionUserIds: { type: [String], default: undefined },
+  mentionRoleIds: { type: [String], default: undefined },
+  mentionEveryone: { type: Boolean, default: undefined }
 }, {
   strict: true
 });
