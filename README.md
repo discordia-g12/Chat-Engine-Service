@@ -1,35 +1,177 @@
 # Chat-Engine-Service
 
-## Desarrollo local
+Servicio de mensajería en tiempo real de Discordia (Node.js 20, TypeScript, Fastify 5). Cada canal de texto
+tiene un WebSocket: el servicio guarda los mensajes en MongoDB y los reparte a los conectados. Al reconectar,
+el cliente recupera los mensajes que se perdió. Además expone el historial paginado.
+
+No decide permisos: le pregunta a Server-Roles-Core si el usuario puede ver y escribir en el canal, y escucha
+sus eventos (`member.*`, `role.*`) por RabbitMQ para aplicar en vivo baneos, expulsiones, silencios y
+cambios de rol.
+
+## Requisitos
+
+- Node.js 20 (la versión de la imagen y del CI) y npm.
+- Docker, para MongoDB y Redis.
+- **Server-Roles-Core-Service** corriendo, para abrir un canal: sin él, el acceso al canal responde `503`.
+  Con su `docker compose up -d` queda en `localhost:8080`.
+- RabbitMQ es opcional: sin él, el chat funciona igual, pero los baneos y silencios no se aplican en vivo.
+
+## Levantarlo en local
+
+### Desde el host, con recarga en caliente
 
 ```bash
 npm install
-docker compose up -d chat-mongo chat-redis
-npm run dev
+docker compose up -d chat-mongo chat-redis      # MongoDB en 27017 y Redis en 6379
+
+# El servicio no lee .env: las variables van exportadas o en la línea
+CORE_SERVICE_URL=http://localhost:8080 npm run dev
 ```
 
-## Tests, lint y seguridad
+### Todo en contenedores
 
 ```bash
-npm run lint                  # ESLint (incluye reglas de seguridad)
-npm run typecheck             # tsc --noEmit
-npm audit --audit-level=high  # SAST de dependencias
-npm run test:coverage         # tests + cobertura (mínimo 85%, ver ADR-01)
+docker compose up -d --build        # MongoDB, Redis y el servicio en localhost:3000
 ```
+
+La app del compose llega a Server-Roles en `http://host.docker.internal:8080` (se cambia con
+`CORE_SERVICE_URL`). Usa la base `chat_db`; `npm run dev`, por defecto, `discordia_chat`: los mensajes de
+una no aparecen en la otra.
+
+Bajar todo: `docker compose down` (con `-v` también borra los datos).
+
+### Probarlo
+
+```bash
+curl localhost:3000/livez
+curl localhost:3000/readyz      # {"status":"ready","checks":{"mongo":"ok","redis":"ok","rabbitmq":"disconnected"}}
+```
+
+Para mandar un mensaje hace falta un canal real: crear un servidor en Server-Roles
+(`POST /api/v1/servers`, que trae un canal de texto "general") y usar su `id`. Sin Kong adelante, la
+identidad va en el header `X-User-Id` (con el mismo usuario que creó el servidor):
+
+```bash
+CANAL=<id del canal>
+npx wscat -c "ws://localhost:3000/channels/$CANAL/ws" -H "X-User-Id: auth0|local-test"
+> {"content":"hola"}
+< {"id":"...","content":"hola","authorId":"auth0|local-test","channelId":"...","createdAt":"..."}
+
+curl "localhost:3000/channels/$CANAL/messages?limit=20" -H "X-User-Id: auth0|local-test"
+```
+
+Con otro `X-User-Id`, que no es miembro del servidor, el canal responde `403`.
+
+### Con el resto del sistema
+
+Para levantarlo junto con el Gateway y los demás servicios, usar el compose del orquestador
+(`discordia-orchestrator/deploy/docker-compose.yml`, profile `local`). Ahí se entra por Kong
+(`localhost:8000/api/v1/chat/...`), que valida el token y agrega `X-User-Id`.
+
+## Variables de entorno
+
+| Variable | Default | Descripción |
+|----------|---------|-------------|
+| `PORT` | `3000` | Puerto HTTP y WebSocket |
+| `MONGO_URI` | `mongodb://localhost:27017/discordia_chat` | Historial de mensajes. En producción, MongoDB Atlas |
+| `REDIS_URL` | `redis://localhost:6379` | Redis (hoy solo lo verifica `/readyz`; está previsto para el pub/sub entre instancias) |
+| `CORE_SERVICE_URL` | `http://localhost:8000` | Server-Roles-Core, para `/internal/channels/{id}/access`. En local, `http://localhost:8080` |
+| `RABBITMQ_URL` | `amqp://admin:admin@rabbitmq:5672/` | Broker de los eventos de Server-Roles |
+| `RABBITMQ_EXCHANGE` | `server.events` | Exchange del que consume |
+| `RABBITMQ_QUEUE` | `chat_engine_events` | Cola durable del servicio |
 
 ## API
 
-Detrás de Kong, bajo `/api/v1/chat`. El usuario llega en el header `X-User-Id` (lo pone Kong al validar el token). Los permisos los decide Server-Roles-Core (`CORE_SERVICE_URL`).
+En producción está detrás de Kong, bajo `/api/v1/chat` (Kong saca ese prefijo). El usuario llega en
+`X-User-Id`, que agrega Kong al validar el token. Los permisos los decide Server-Roles-Core.
 
-- `GET /channels/:channelId/ws?last_message_id_seen=` — WebSocket del canal: envía y recibe mensajes; al reconectar, reenvía los posteriores a `last_message_id_seen`.
-- `GET /channels/:channelId/messages?limit=&before=` — historial, en orden cronológico; `before` es el id del mensaje más viejo cargado.
-- `GET /unread` — canales con mensajes sin leer (`unreadCount`, hasta 100, y `mentionCount`). Ver ADR-02.
-- `POST /channels/:channelId/read` — marca el canal leído hasta `messageId` (body opcional) o hasta el último mensaje. Nunca retrocede.
-- `POST /read-states/read-all` — marca leídos todos los canales que el usuario puede ver.
+- `GET /channels/:channelId/ws?last_message_id_seen=`: WebSocket del canal. El cliente manda
+  `{"content": "..."}` y recibe cada mensaje nuevo del canal. Al reconectar con `last_message_id_seen`,
+  recibe los posteriores a ese mensaje.
+- `GET /channels/:channelId/messages?limit=&before=`: historial en orden cronológico (50 por defecto).
+  `before` es el id del mensaje más viejo que ya tiene el cliente, para cargar los anteriores.
+- `GET /unread`: canales con mensajes sin leer, con `unreadCount` (hasta 100) y `mentionCount`. Ver ADR-02.
+- `POST /channels/:channelId/read`: marca el canal leído hasta `messageId` (body opcional) o hasta el
+  último mensaje. Nunca retrocede.
+- `POST /read-states/read-all`: marca leídos todos los canales que el usuario puede ver.
+- `GET /livez`: el proceso está vivo. No consulta Mongo ni Redis, para que una caída de ellos no reinicie el
+  contenedor.
+- `GET /readyz`: ping a Mongo y Redis (1 s cada uno). `200` si los dos responden; `503` con el detalle si
+  falla alguno. RabbitMQ se informa pero no define si está listo: sin eventos el chat sigue andando.
 
-Los errores siguen RFC 7807 (`application/problem+json`): `400` datos inválidos, `401` sin usuario, `403` sin acceso al canal, `404` canal o mensaje inexistente, `503` si Server-Roles no responde.
+Los errores siguen RFC 7807 (`application/problem+json`): `400` datos inválidos, `401` sin usuario, `403`
+sin acceso al canal, `404` canal inexistente o mensaje inexistente y `503` si Server-Roles no responde. Por el WebSocket, un error
+llega como `{"error": "...", "status": 403}`.
 
-## Health checks
+### Mensajes del servidor por el WebSocket
 
-- `GET /livez` — liveness: el proceso está vivo. No depende de Mongo/Redis (una caída de ellos no debe reiniciar el contenedor).
-- `GET /readyz` — readiness: hace ping a Mongo y Redis (timeout 1s c/u). `200 {status:"ready"}` si ambos responden; `503 {status:"not_ready", checks:{mongo, redis}}` si alguno falla.
+| Mensaje o cierre | Cuándo |
+|---|---|
+| `{"type":"PERMISSIONS_UPDATED","canSend":false}` | Al conectar, si el usuario puede leer pero no escribir (silenciado o sin `SEND_MESSAGES`), y cada vez que eso cambia |
+| Cierre `4003` | Lo banearon del servidor (`member.banned`) |
+| Cierre `4002` | Lo expulsaron o abandonó el servidor (`member.kicked`, `member.left`) |
+
+Cada 30 s el servidor manda un ping de protocolo y cierra las conexiones que no responden (evita el corte de
+Cloudflare a los ~100 s).
+
+### Eventos que consume
+
+Cola `chat_engine_events`, enlazada a `member.*` y `role.*` del exchange `server.events`:
+
+- `member.banned`, `member.kicked` y `member.left`: cierra las sesiones de ese usuario en ese servidor;
+- `member.muted` y `member.unmuted`: bloquea o habilita la escritura, y programa el fin del silencio;
+- `member.role_assigned`, `member.role_removed`, `role.permissions_updated` y `role.deleted`: vuelve a
+  preguntar a Server-Roles si puede escribir.
+
+Si RabbitMQ no está al arrancar, el consumidor reintenta solo (de 1 a 30 s) sin bloquear el servicio.
+
+## Tests, lint y seguridad
+
+Los mismos comandos que corre el CI:
+
+```bash
+npm run lint                   # ESLint, con reglas de seguridad
+npm run typecheck              # tsc --noEmit
+npm audit --audit-level=high   # dependencias con vulnerabilidades
+npm run test:coverage          # tests + cobertura (mínimo 85 %, ver ADR-01)
+```
+
+Los tests no necesitan Docker: levantan un MongoDB en memoria (`mongodb-memory-server`, que la primera vez
+descarga el binario) y simulan Redis, RabbitMQ y Server-Roles.
+
+## Estructura
+
+```text
+src/
+├── server.ts                  arranque: Mongo, Redis, consumidor de eventos y HTTP
+├── app.ts                     app de Fastify, /livez y /readyz
+├── plugins/websocket.ts       WebSocket del canal
+├── plugins/history.ts         historial
+├── plugins/errorHandler.ts    errores RFC 7807
+├── services/ChatService.ts    guardar mensajes, historial y mensajes perdidos
+├── services/SessionManager.ts sesiones abiertas por canal y usuario (en memoria)
+├── services/PermissionService.ts  consulta a Server-Roles
+├── services/EventConsumer.ts  eventos de RabbitMQ
+├── helpers/                   identidad, permisos y heartbeat
+├── models/Message.ts          modelo de Mongoose
+└── config/                    Mongo, Redis y readiness
+tests/
+```
+
+## CI/CD
+
+`.github/workflows/ci.yml`, en cada push y PR a `main` y `develop`:
+
+1. `test`: lint, typecheck y tests con cobertura. `npm audit` se muestra en el log pero no bloquea.
+2. `docker`: construye la imagen; en push la publica como `ghcr.io/discordia-g12/chat-engine-service:<sha>`.
+3. `deploy`: en push a `main`, la despliega en el nodo **realtime** con el workflow del orquestador. Si no
+   queda sana, vuelve sola a la versión anterior.
+
+## Decisiones de arquitectura
+
+| ADR | Tema |
+|-----|------|
+| [ADR-01](docs/ADR-01-CI-CD-Pipeline.md) | Pipeline de CI/CD |
+
+Pendiente conocido: el reparto de mensajes es solo a los sockets de esta instancia. Con más de una
+instancia hace falta el pub/sub por Redis (ver `docs/DEUDA-TECNICA.md` del orquestador, C3).
