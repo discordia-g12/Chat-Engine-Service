@@ -3,6 +3,7 @@ import fastifyWebsocket from '@fastify/websocket';
 import { ChatService } from '../services/ChatService';
 import { SessionManager } from '../services/SessionManager';
 import { EventConsumer } from '../services/EventConsumer';
+import { ReadStateService } from '../services/ReadStateService';
 import { channelAccessGuard } from '../helpers/auth';
 import { toProblem, ValidationError, ForbiddenError } from '../errors';
 import { startHeartbeat } from '../helpers/heartbeat';
@@ -35,14 +36,11 @@ export default async function websocketPlugin(app: FastifyInstance, opts: Websoc
         });
 
         if (!canSend) {
-          // Puede leer pero no escribir (muteado o sin SEND_MESSAGES): se avisa de entrada, no recién
-          // cuando falla el primer envío. Si puede escribir no se manda nada (es lo que asume el cliente).
           connection.send(JSON.stringify({ type: 'PERMISSIONS_UPDATED', canSend: false, channelId }));
           if (req.mutedUntil) {
             EventConsumer.scheduleMuteExpiry(userId, serverId, Math.max(req.mutedUntil.getTime() - Date.now(), 0));
           }
         }
-        // Mantiene viva la conexión detrás de Cloudflare y corta las que quedaron muertas
         const stopHeartbeat = startHeartbeat(connection, opts.pingIntervalMs);
 
         connection.on('message', async (message: Buffer) => {
@@ -71,6 +69,10 @@ export default async function websocketPlugin(app: FastifyInstance, opts: Websoc
                 client.send(rawPayload);
               }
             }
+
+            ReadStateService.markRead(userId, channelId, savedPayload.id).catch((err) =>
+              req.log.warn({ err, channelId }, 'Failed to update the sender read state')
+            );
           } catch (error) {
             const problem = toProblem(error);
             if (problem.status >= 500) {

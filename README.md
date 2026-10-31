@@ -90,13 +90,17 @@ En producción está detrás de Kong, bajo `/api/v1/chat` (Kong saca ese prefijo
   recibe los posteriores a ese mensaje.
 - `GET /channels/:channelId/messages?limit=&before=`: historial en orden cronológico (50 por defecto).
   `before` es el id del mensaje más viejo que ya tiene el cliente, para cargar los anteriores.
+- `GET /unread`: canales con mensajes sin leer, con `unreadCount` (hasta 100) y `mentionCount`. Ver ADR-02.
+- `POST /channels/:channelId/read`: marca el canal leído hasta `messageId` (body opcional) o hasta el
+  último mensaje. Nunca retrocede.
+- `POST /read-states/read-all`: marca leídos todos los canales que el usuario puede ver.
 - `GET /livez`: el proceso está vivo. No consulta Mongo ni Redis, para que una caída de ellos no reinicie el
   contenedor.
 - `GET /readyz`: ping a Mongo y Redis (1 s cada uno). `200` si los dos responden; `503` con el detalle si
   falla alguno. RabbitMQ se informa pero no define si está listo: sin eventos el chat sigue andando.
 
 Los errores siguen RFC 7807 (`application/problem+json`): `400` datos inválidos, `401` sin usuario, `403`
-sin acceso al canal, `404` canal inexistente y `503` si Server-Roles no responde. Por el WebSocket, un error
+sin acceso al canal, `404` canal inexistente o mensaje inexistente y `503` si Server-Roles no responde. Por el WebSocket, un error
 llega como `{"error": "...", "status": 403}`.
 
 ### Mensajes del servidor por el WebSocket

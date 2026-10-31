@@ -3,6 +3,7 @@ import websocketPlugin from './plugins/websocket';
 import { DEFAULT_PING_INTERVAL_MS } from './helpers/heartbeat';
 import { EventConsumer } from './services/EventConsumer';
 import historyPlugin from './plugins/history';
+import readStatesPlugin from './plugins/readStates';
 import { registerErrorHandler } from './plugins/errorHandler';
 import { getRedis } from './config/redis';
 import { checkMongo, checkRedis, RedisPinger } from './config/readiness';
@@ -26,6 +27,7 @@ function buildApp(opts: BuildAppOptions = {}): FastifyInstance {
     pingIntervalMs: opts.wsPingIntervalMs ?? DEFAULT_PING_INTERVAL_MS,
   });
   app.register(historyPlugin);
+  app.register(readStatesPlugin);
 
   app.get('/livez', async () => {
     return { status: 'ok', timestamp: new Date().toISOString() };
