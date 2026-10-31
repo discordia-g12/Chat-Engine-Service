@@ -1,6 +1,14 @@
 import { Message, IMessage } from '../models/Message';
-import { PermissionService } from './PermissionService';
+import { ChannelAccessResult, PermissionService } from './PermissionService';
 import { ForbiddenError } from '../errors';
+import { parseMentions } from '../helpers/mentions';
+
+/** Menciones que notifican. Un @everyone o un rol sin permiso queda en el texto pero no acá. */
+export interface MessageMentions {
+  users: string[];
+  roles: string[];
+  everyone: boolean;
+}
 
 export interface MessagePayload {
   id: string;
@@ -8,6 +16,22 @@ export interface MessagePayload {
   authorId: string;
   channelId: string;
   createdAt: Date;
+  mentions: MessageMentions;
+}
+
+function toPayload(msg: IMessage): MessagePayload {
+  return {
+    id: msg._id.toString(),
+    content: msg.content,
+    authorId: msg.authorId,
+    channelId: msg.channelId,
+    createdAt: msg.createdAt,
+    mentions: {
+      users: msg.mentionUserIds ?? [],
+      roles: msg.mentionRoleIds ?? [],
+      everyone: msg.mentionEveryone === true,
+    },
+  };
 }
 
 export class ChatService {
@@ -35,13 +59,7 @@ export class ChatService {
       .limit(limit)
       .lean<IMessage[]>();
 
-    return messages.reverse().map((msg) => ({
-      id: msg._id.toString(),
-      content: msg.content,
-      authorId: msg.authorId,
-      channelId: msg.channelId,
-      createdAt: msg.createdAt,
-    }));
+    return messages.reverse().map(toPayload);
   }
 
   /**
@@ -67,21 +85,20 @@ export class ChatService {
       .sort({ _id: 1 })
       .lean<IMessage[]>();
 
-    return missedMessages.map((msg) => ({
-      id: msg._id.toString(),
-      content: msg.content,
-      authorId: msg.authorId,
-      channelId: msg.channelId,
-      createdAt: msg.createdAt,
-    }));
+    return missedMessages.map(toPayload);
   }
 
   /**
    * Validates permissions and persists a new chat message into MongoDB.
    *
+   * Las menciones se sacan del texto. Mencionar a @everyone o a un rol exige MENTION_EVERYONE, que se
+   * consulta a Core en el momento (solo si el mensaje las tiene); sin el permiso quedan como texto plano.
+   * Las menciones de usuario no requieren permiso.
+   *
    * @param authorId User sending the message
    * @param channelId Target channel identifier
    * @param content Text body of the message
+   * @throws UpstreamUnavailableError si hay que validar @everyone o un rol y Core no responde
    */
   static async sendMessage(
     authorId: string,
@@ -89,10 +106,24 @@ export class ChatService {
     content: string,
     skipPermissionCheck = false
   ): Promise<MessagePayload> {
+    let access: ChannelAccessResult | undefined;
     if (!skipPermissionCheck) {
-      const result = await PermissionService.getChannelAccess(authorId, channelId);
-      if (!result.canSend) {
+      access = await PermissionService.getChannelAccess(authorId, channelId);
+      if (!access.canSend) {
         throw new ForbiddenError('User does not have permission to send messages in this channel');
+      }
+    }
+
+    const parsed = parseMentions(content);
+    let roleIds: string[] = [];
+    let everyone = false;
+    if (parsed.everyone || parsed.roleIds.length > 0) {
+      const { canMentionEveryone, mentionableRoleIds } =
+        access ?? (await PermissionService.getChannelAccess(authorId, channelId));
+      if (canMentionEveryone) {
+        everyone = parsed.everyone;
+        // Solo roles de este servidor
+        roleIds = parsed.roleIds.filter((roleId) => mentionableRoleIds.includes(roleId));
       }
     }
 
@@ -100,19 +131,14 @@ export class ChatService {
       content,
       authorId,
       channelId,
+      ...(parsed.userIds.length > 0 ? { mentionUserIds: parsed.userIds } : {}),
+      ...(roleIds.length > 0 ? { mentionRoleIds: roleIds } : {}),
+      ...(everyone ? { mentionEveryone: true } : {}),
     });
 
     await messageDocument.validate();
     await messageDocument.save();
 
-    const saved = messageDocument.toObject<IMessage>();
-
-    return {
-      id: saved._id.toString(),
-      content: saved.content,
-      authorId: saved.authorId,
-      channelId: saved.channelId,
-      createdAt: saved.createdAt,
-    };
+    return toPayload(messageDocument.toObject<IMessage>());
   }
 }
