@@ -55,7 +55,7 @@ identidad va en el header `X-User-Id` (con el mismo usuario que creó el servido
 CANAL=<id del canal>
 npx wscat -c "ws://localhost:3000/channels/$CANAL/ws" -H "X-User-Id: auth0|local-test"
 > {"content":"hola"}
-< {"id":"...","content":"hola","authorId":"auth0|local-test","channelId":"...","createdAt":"..."}
+< {"id":"...","content":"hola","authorId":"auth0|local-test","channelId":"...","createdAt":"...","mentions":{"users":[],"roles":[],"everyone":false}}
 
 curl "localhost:3000/channels/$CANAL/messages?limit=20" -H "X-User-Id: auth0|local-test"
 ```
@@ -75,7 +75,7 @@ Para levantarlo junto con el Gateway y los demás servicios, usar el compose del
 | `PORT` | `3000` | Puerto HTTP y WebSocket |
 | `MONGO_URI` | `mongodb://localhost:27017/discordia_chat` | Historial de mensajes. En producción, MongoDB Atlas |
 | `REDIS_URL` | `redis://localhost:6379` | Redis (hoy solo lo verifica `/readyz`; está previsto para el pub/sub entre instancias) |
-| `CORE_SERVICE_URL` | `http://localhost:8000` | Server-Roles-Core, para `/internal/channels/{id}/access`. En local, `http://localhost:8080` |
+| `CORE_SERVICE_URL` | `http://localhost:8000` | Server-Roles-Core, para `/internal/channels/{id}/access` y `/internal/users/{id}/visible-channels`. En local, `http://localhost:8080` |
 | `RABBITMQ_URL` | `amqp://admin:admin@rabbitmq:5672/` | Broker de los eventos de Server-Roles |
 | `RABBITMQ_EXCHANGE` | `server.events` | Exchange del que consume |
 | `RABBITMQ_QUEUE` | `chat_engine_events` | Cola durable del servicio |
@@ -88,15 +88,23 @@ En producción está detrás de Kong, bajo `/api/v1/chat` (Kong saca ese prefijo
 - `GET /channels/:channelId/ws?last_message_id_seen=`: WebSocket del canal. El cliente manda
   `{"content": "..."}` y recibe cada mensaje nuevo del canal. Al reconectar con `last_message_id_seen`,
   recibe los posteriores a ese mensaje.
+- Menciones en el texto: `<@userId>`, `<@&roleId>` y `@everyone`. Las de rol y `@everyone` exigen
+  `MENTION_EVERYONE`; sin ese permiso quedan como texto. Cada mensaje trae en `mentions` las que notifican.
+  Ver ADR-03.
 - `GET /channels/:channelId/messages?limit=&before=`: historial en orden cronológico (50 por defecto).
   `before` es el id del mensaje más viejo que ya tiene el cliente, para cargar los anteriores.
+- `GET /unread`: canales con mensajes sin leer, con `unreadCount` y `mentionCount` (hasta 100 cada uno). Ver
+  ADR-02 y ADR-03.
+- `POST /channels/:channelId/read`: marca el canal leído hasta `messageId` (body opcional) o hasta el
+  último mensaje. Nunca retrocede.
+- `POST /read-states/read-all`: marca leídos todos los canales que el usuario puede ver.
 - `GET /livez`: el proceso está vivo. No consulta Mongo ni Redis, para que una caída de ellos no reinicie el
   contenedor.
 - `GET /readyz`: ping a Mongo y Redis (1 s cada uno). `200` si los dos responden; `503` con el detalle si
   falla alguno. RabbitMQ se informa pero no define si está listo: sin eventos el chat sigue andando.
 
 Los errores siguen RFC 7807 (`application/problem+json`): `400` datos inválidos, `401` sin usuario, `403`
-sin acceso al canal, `404` canal inexistente y `503` si Server-Roles no responde. Por el WebSocket, un error
+sin acceso al canal, `404` canal inexistente o mensaje inexistente y `503` si Server-Roles no responde. Por el WebSocket, un error
 llega como `{"error": "...", "status": 403}`.
 
 ### Mensajes del servidor por el WebSocket
@@ -168,6 +176,8 @@ tests/
 | ADR | Tema |
 |-----|------|
 | [ADR-01](docs/ADR-01-CI-CD-Pipeline.md) | Pipeline de CI/CD |
+| [ADR-02](docs/ADR-02-Read-States.md) | Estado de lectura y no leídos por canal |
+| [ADR-03](docs/ADR-03-Mentions.md) | Menciones de usuario, de rol y @everyone |
 
 Pendiente conocido: el reparto de mensajes es solo a los sockets de esta instancia. Con más de una
 instancia hace falta el pub/sub por Redis (ver `docs/DEUDA-TECNICA.md` del orquestador, C3).

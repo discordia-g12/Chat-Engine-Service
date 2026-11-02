@@ -30,7 +30,36 @@ describe('PermissionService', () => {
     mock.method(globalThis, 'fetch', async () => ok({ server_id: 'srv-123', can_send: true, muted_until: null }));
 
     const result = await PermissionService.getChannelAccess('valid-user', 'channel-1');
-    assert.deepStrictEqual(result, { allowed: true, serverId: 'srv-123', canSend: true, mutedUntil: undefined });
+    assert.deepStrictEqual(result, {
+      allowed: true,
+      serverId: 'srv-123',
+      canSend: true,
+      mutedUntil: undefined,
+      canMentionEveryone: false,
+      mentionableRoleIds: [],
+    });
+  });
+
+  it('returns whether the user can mention @everyone and which roles', async () => {
+    mock.method(globalThis, 'fetch', async () =>
+      ok({ server_id: 'srv-1', can_send: true, can_mention_everyone: true, mentionable_role_ids: ['r1', 'r2'] })
+    );
+
+    const result = await PermissionService.getChannelAccess('user-1', 'channel-1');
+    assert.strictEqual(result.canMentionEveryone, true);
+    assert.deepStrictEqual(result.mentionableRoleIds, ['r1', 'r2']);
+  });
+
+  it('ignores the roles without MENTION_EVERYONE or with an unexpected shape', async () => {
+    mock.method(globalThis, 'fetch', async () =>
+      ok({ server_id: 'srv-1', can_send: true, can_mention_everyone: false, mentionable_role_ids: ['r1'] })
+    );
+    assert.deepStrictEqual((await PermissionService.getChannelAccess('user-1', 'channel-1')).mentionableRoleIds, []);
+
+    mock.method(globalThis, 'fetch', async () =>
+      ok({ server_id: 'srv-1', can_send: true, can_mention_everyone: true, mentionable_role_ids: [1] })
+    );
+    assert.deepStrictEqual((await PermissionService.getChannelAccess('user-1', 'channel-1')).mentionableRoleIds, []);
   });
 
   it('allows a muted user to view but not send, with the mute expiry', async () => {
@@ -63,7 +92,7 @@ describe('PermissionService', () => {
     mock.method(globalThis, 'fetch', async () => ({ status: 403 }) as Response);
 
     const result = await PermissionService.getChannelAccess('banned-user', 'channel-1');
-    assert.deepStrictEqual(result, { allowed: false, canSend: false });
+    assert.deepStrictEqual(result, { allowed: false, canSend: false, canMentionEveryone: false, mentionableRoleIds: [] });
   });
 
   it('throws if the channel does not exist (404)', async () => {
@@ -101,6 +130,53 @@ describe('PermissionService', () => {
   it('throws if channelId is missing', async () => {
     await assert.rejects(PermissionService.getChannelAccess('user-1', ''), {
       message: 'User ID and Channel ID are required to check permissions',
+    });
+  });
+
+  describe('getVisibleChannels', () => {
+    it('calls /visible-channels and returns the channel ids and the user roles', async () => {
+      let calledUrl = '';
+      mock.method(globalThis, 'fetch', async (url: string | URL | Request) => {
+        calledUrl = url.toString();
+        return ok({ channel_ids: ['c1', 'c2'], role_ids: ['r1'] });
+      });
+
+      assert.deepStrictEqual(await PermissionService.getVisibleChannels('user 1'), {
+        channelIds: ['c1', 'c2'],
+        roleIds: ['r1'],
+      });
+      assert.match(calledUrl, /\/internal\/users\/user%201\/visible-channels$/);
+    });
+
+    it('takes the roles as empty when Core does not send them (before #46)', async () => {
+      mock.method(globalThis, 'fetch', async () => ok({ channel_ids: ['c1'] }));
+      assert.deepStrictEqual(await PermissionService.getVisibleChannels('user-1'), { channelIds: ['c1'], roleIds: [] });
+
+      mock.method(globalThis, 'fetch', async () => ok({ channel_ids: ['c1'], role_ids: 'r1' }));
+      assert.deepStrictEqual(await PermissionService.getVisibleChannels('user-1'), { channelIds: ['c1'], roleIds: [] });
+    });
+
+    it('fails as unavailable when Core cannot be reached', async () => {
+      mock.method(globalThis, 'fetch', async () => {
+        throw new Error('fetch failed');
+      });
+
+      await assert.rejects(PermissionService.getVisibleChannels('user-1'), { name: 'UpstreamUnavailableError' });
+    });
+
+    it('fails as unavailable on an unexpected status or body', async () => {
+      mock.method(globalThis, 'fetch', async () => ({ status: 500 }) as Response);
+      await assert.rejects(PermissionService.getVisibleChannels('user-1'), { name: 'UpstreamUnavailableError' });
+
+      mock.method(globalThis, 'fetch', async () => ok({ channel_ids: [1, 2] }));
+      await assert.rejects(PermissionService.getVisibleChannels('user-1'), { name: 'UpstreamUnavailableError' });
+
+      mock.method(globalThis, 'fetch', async () => ({ status: 200, json: async () => { throw new Error('no body'); } }) as unknown as Response);
+      await assert.rejects(PermissionService.getVisibleChannels('user-1'), { name: 'UpstreamUnavailableError' });
+    });
+
+    it('requires a user id', async () => {
+      await assert.rejects(PermissionService.getVisibleChannels(''), /User ID is required/);
     });
   });
 });
