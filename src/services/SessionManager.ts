@@ -14,10 +14,29 @@ export class SessionManager {
   private static userSessions = new Map<string, Set<ClientSession>>();
   private static socketSessions = new Map<WebSocket, ClientSession>();
 
+  private static onChannelActive?: (channelId: string) => void;
+  private static onChannelEmpty?: (channelId: string) => void;
+  private static onClear?: () => void;
+
+  static setChannelHooks(hooks: {
+    onChannelActive?: (channelId: string) => void;
+    onChannelEmpty?: (channelId: string) => void;
+    onClear?: () => void;
+  }): void {
+    this.onChannelActive = hooks.onChannelActive;
+    this.onChannelEmpty = hooks.onChannelEmpty;
+    this.onClear = hooks.onClear;
+  }
+
+  static getActiveChannelIds(): string[] {
+    return Array.from(this.channelSockets.keys());
+  }
+
   static register(session: ClientSession): void {
     const { channelId, userId, socket } = session;
 
-    if (!this.channelSockets.has(channelId)) {
+    const isFirstSocket = !this.channelSockets.has(channelId);
+    if (isFirstSocket) {
       this.channelSockets.set(channelId, new Set());
     }
     this.channelSockets.get(channelId)!.add(socket);
@@ -28,6 +47,10 @@ export class SessionManager {
     this.userSessions.get(userId)!.add(session);
 
     this.socketSessions.set(socket, session);
+
+    if (isFirstSocket && this.onChannelActive) {
+      this.onChannelActive(channelId);
+    }
   }
 
   static unregister(socket: WebSocket): ClientSession | undefined {
@@ -39,10 +62,12 @@ export class SessionManager {
     this.socketSessions.delete(socket);
 
     const channelSet = this.channelSockets.get(session.channelId);
+    let isLastSocket = false;
     if (channelSet) {
       channelSet.delete(socket);
       if (channelSet.size === 0) {
         this.channelSockets.delete(session.channelId);
+        isLastSocket = true;
       }
     }
 
@@ -52,6 +77,10 @@ export class SessionManager {
       if (userSet.size === 0) {
         this.userSessions.delete(session.userId);
       }
+    }
+
+    if (isLastSocket && this.onChannelEmpty) {
+      this.onChannelEmpty(session.channelId);
     }
 
     return session;
@@ -126,5 +155,8 @@ export class SessionManager {
     this.channelSockets.clear();
     this.userSessions.clear();
     this.socketSessions.clear();
+    if (this.onClear) {
+      this.onClear();
+    }
   }
 }
