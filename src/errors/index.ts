@@ -29,6 +29,11 @@ export class NotFoundError extends AppError {
   readonly title = 'Not Found';
 }
 
+export class PayloadTooLargeError extends AppError {
+  readonly statusCode = 413;
+  readonly title = 'Payload Too Large';
+}
+
 /** A dependency (e.g. Core) is down or misbehaving: transient, safe to retry. */
 export class UpstreamUnavailableError extends AppError {
   readonly statusCode = 503;
@@ -58,6 +63,17 @@ export function toProblem(error: unknown, instance?: string): ProblemDetails {
   if (isMongooseValidationError(error)) {
     const first = Object.values(error.errors)[0];
     return { type: 'about:blank', title: 'Bad Request', status: 400, detail: first?.message ?? 'Invalid input', instance };
+  }
+
+  const code = (error as { code?: unknown })?.code;
+  if (code === 'FST_REQ_FILE_TOO_LARGE' || (error as { statusCode?: unknown })?.statusCode === 413) {
+    return {
+      type: 'about:blank',
+      title: 'Payload Too Large',
+      status: 413,
+      detail: 'El archivo supera el tamaño máximo permitido de 10 MB.',
+      instance,
+    };
   }
 
   const statusCode = (error as { statusCode?: unknown })?.statusCode;

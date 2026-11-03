@@ -61,7 +61,13 @@ export default async function websocketPlugin(app: FastifyInstance, opts: Websoc
               throw new ForbiddenError('User does not have permission to send messages in this channel');
             }
 
-            const savedPayload = await ChatService.sendMessage(userId, channelId, data.content, true);
+            const savedPayload = await ChatService.sendMessage(
+              userId,
+              channelId,
+              data.content || '',
+              data.attachments,
+              true
+            );
 
             await PubSubService.publish(channelId, savedPayload);
 
