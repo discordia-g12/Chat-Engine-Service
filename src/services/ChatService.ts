@@ -10,6 +10,14 @@ export interface MessageMentions {
   everyone: boolean;
 }
 
+export interface MessageAttachmentPayload {
+  id: string;
+  name: string;
+  url: string;
+  size: number;
+  contentType: string;
+}
+
 export interface MessagePayload {
   id: string;
   content: string;
@@ -17,6 +25,7 @@ export interface MessagePayload {
   channelId: string;
   createdAt: Date;
   mentions: MessageMentions;
+  attachments?: MessageAttachmentPayload[];
 }
 
 function toPayload(msg: IMessage): MessagePayload {
@@ -31,6 +40,17 @@ function toPayload(msg: IMessage): MessagePayload {
       roles: msg.mentionRoleIds ?? [],
       everyone: msg.mentionEveryone === true,
     },
+    ...(msg.attachments && msg.attachments.length > 0
+      ? {
+          attachments: msg.attachments.map((att) => ({
+            id: att.id,
+            name: att.name,
+            url: att.url,
+            size: att.size,
+            contentType: att.contentType,
+          })),
+        }
+      : {}),
   };
 }
 
@@ -104,8 +124,12 @@ export class ChatService {
     authorId: string,
     channelId: string,
     content: string,
-    skipPermissionCheck = false
+    attachmentsOrSkip?: MessageAttachmentPayload[] | boolean,
+    skipCheck = false
   ): Promise<MessagePayload> {
+    const attachments = Array.isArray(attachmentsOrSkip) ? attachmentsOrSkip : undefined;
+    const skipPermissionCheck = typeof attachmentsOrSkip === 'boolean' ? attachmentsOrSkip : skipCheck;
+
     let access: ChannelAccessResult | undefined;
     if (!skipPermissionCheck) {
       access = await PermissionService.getChannelAccess(authorId, channelId);
@@ -134,6 +158,7 @@ export class ChatService {
       ...(parsed.userIds.length > 0 ? { mentionUserIds: parsed.userIds } : {}),
       ...(roleIds.length > 0 ? { mentionRoleIds: roleIds } : {}),
       ...(everyone ? { mentionEveryone: true } : {}),
+      ...(attachments && attachments.length > 0 ? { attachments } : {}),
     });
 
     await messageDocument.validate();

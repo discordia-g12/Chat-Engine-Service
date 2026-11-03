@@ -120,4 +120,40 @@ describe('Message Model Validations', () => {
     const obj = msg.toObject();
     assert.strictEqual(obj.hack, undefined);
   });
+
+  it('should validate message with attachments and empty content successfully', async () => {
+    const msg = new Message({
+      content: '',
+      authorId: 'user-123',
+      channelId: 'channel-456',
+      attachments: [{
+        id: 'att-1',
+        name: 'photo.png',
+        url: 'https://example.com/photo.png',
+        size: 1024,
+        contentType: 'image/png'
+      }]
+    });
+    await assert.doesNotReject(async () => {
+      await msg.validate();
+    });
+  });
+
+  it('should validate message with attachments and content successfully', async () => {
+    const msg = new Message({
+      content: 'Here is the file',
+      authorId: 'user-123',
+      channelId: 'channel-456',
+      attachments: [{
+        id: 'att-2',
+        name: 'doc.pdf',
+        url: 'https://example.com/doc.pdf',
+        size: 2048,
+        contentType: 'application/pdf'
+      }]
+    });
+    await assert.doesNotReject(async () => {
+      await msg.validate();
+    });
+  });
 });
