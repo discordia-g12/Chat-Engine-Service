@@ -4,6 +4,7 @@ import { ChatService } from '../services/ChatService';
 import { SessionManager } from '../services/SessionManager';
 import { EventConsumer } from '../services/EventConsumer';
 import { ReadStateService } from '../services/ReadStateService';
+import { PubSubService } from '../services/PubSubService';
 import { channelAccessGuard } from '../helpers/auth';
 import { toProblem, ValidationError, ForbiddenError } from '../errors';
 import { startHeartbeat } from '../helpers/heartbeat';
@@ -60,15 +61,15 @@ export default async function websocketPlugin(app: FastifyInstance, opts: Websoc
               throw new ForbiddenError('User does not have permission to send messages in this channel');
             }
 
-            const savedPayload = await ChatService.sendMessage(userId, channelId, data.content, true);
+            const savedPayload = await ChatService.sendMessage(
+              userId,
+              channelId,
+              data.content || '',
+              data.attachments,
+              true
+            );
 
-            const channelClients = SessionManager.getChannelSockets(channelId);
-            const rawPayload = JSON.stringify(savedPayload);
-            for (const client of channelClients) {
-              if (client.readyState === 1) {
-                client.send(rawPayload);
-              }
-            }
+            await PubSubService.publish(channelId, savedPayload);
 
             ReadStateService.markRead(userId, channelId, savedPayload.id).catch((err) =>
               req.log.warn({ err, channelId }, 'Failed to update the sender read state')

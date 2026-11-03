@@ -1,7 +1,8 @@
 # Chat-Engine-Service
 
 Servicio de mensajería en tiempo real de Discordia (Node.js 20, TypeScript, Fastify 5). Cada canal de texto
-tiene un WebSocket: el servicio guarda los mensajes en MongoDB y los reparte a los conectados. Al reconectar,
+tiene un WebSocket: el servicio guarda los mensajes en MongoDB y los reparte a los conectados (localmente y entre
+múltiples instancias mediante Redis Pub/Sub, según el ADR 0006). Al reconectar,
 el cliente recupera los mensajes que se perdió. Además expone el historial paginado.
 
 No decide permisos: le pregunta a Server-Roles-Core si el usuario puede ver y escribir en el canal, y escucha
@@ -74,7 +75,7 @@ Para levantarlo junto con el Gateway y los demás servicios, usar el compose del
 |----------|---------|-------------|
 | `PORT` | `3000` | Puerto HTTP y WebSocket |
 | `MONGO_URI` | `mongodb://localhost:27017/discordia_chat` | Historial de mensajes. En producción, MongoDB Atlas |
-| `REDIS_URL` | `redis://localhost:6379` | Redis (hoy solo lo verifica `/readyz`; está previsto para el pub/sub entre instancias) |
+| `REDIS_URL` | `redis://localhost:6379` | Redis para pub/sub de mensajería multi-instancia y verificación en `/readyz` |
 | `CORE_SERVICE_URL` | `http://localhost:8000` | Server-Roles-Core, para `/internal/channels/{id}/access` y `/internal/users/{id}/visible-channels`. En local, `http://localhost:8080` |
 | `RABBITMQ_URL` | `amqp://admin:admin@rabbitmq:5672/` | Broker de los eventos de Server-Roles |
 | `RABBITMQ_EXCHANGE` | `server.events` | Exchange del que consume |
@@ -154,6 +155,7 @@ src/
 ├── plugins/errorHandler.ts    errores RFC 7807
 ├── services/ChatService.ts    guardar mensajes, historial y mensajes perdidos
 ├── services/SessionManager.ts sesiones abiertas por canal y usuario (en memoria)
+├── services/PubSubService.ts   distribución de mensajes multi-nodo (Redis Pub/Sub)
 ├── services/PermissionService.ts  consulta a Server-Roles
 ├── services/EventConsumer.ts  eventos de RabbitMQ
 ├── helpers/                   identidad, permisos y heartbeat
@@ -179,5 +181,5 @@ tests/
 | [ADR-02](docs/ADR-02-Read-States.md) | Estado de lectura y no leídos por canal |
 | [ADR-03](docs/ADR-03-Mentions.md) | Menciones de usuario, de rol y @everyone |
 
-Pendiente conocido: el reparto de mensajes es solo a los sockets de esta instancia. Con más de una
-instancia hace falta el pub/sub por Redis (ver `docs/DEUDA-TECNICA.md` del orquestador, C3).
+Escalabilidad multi-nodo: implementada con Redis Pub/Sub (`channel:{channel_id}`) según ADR 0006 y el issue #7.
+Cada réplica se suscribe a los canales activos y distribuye los mensajes entre pods sin duplicar envíos.
