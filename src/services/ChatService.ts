@@ -1,6 +1,7 @@
+import mongoose from 'mongoose';
 import { Message, IMessage } from '../models/Message';
 import { ChannelAccessResult, PermissionService } from './PermissionService';
-import { ForbiddenError } from '../errors';
+import { ForbiddenError, NotFoundError, ValidationError } from '../errors';
 import { parseMentions } from '../helpers/mentions';
 
 /** Menciones que notifican. Un @everyone o un rol sin permiso queda en el texto pero no acá. */
@@ -26,6 +27,9 @@ export interface MessagePayload {
   createdAt: Date;
   mentions: MessageMentions;
   attachments?: MessageAttachmentPayload[];
+  edited?: boolean;
+  editedAt?: Date | null;
+  type?: string;
 }
 
 function toPayload(msg: IMessage): MessagePayload {
@@ -40,6 +44,7 @@ function toPayload(msg: IMessage): MessagePayload {
       roles: msg.mentionRoleIds ?? [],
       everyone: msg.mentionEveryone === true,
     },
+    ...(msg.edited ? { edited: true, editedAt: msg.editedAt ?? null } : {}),
     ...(msg.attachments && msg.attachments.length > 0
       ? {
           attachments: msg.attachments.map((att) => ({
@@ -165,5 +170,80 @@ export class ChatService {
     await messageDocument.save();
 
     return toPayload(messageDocument.toObject<IMessage>());
+  }
+
+  /**
+   * Modifica el contenido de un mensaje existente.
+   * Solo el autor del mensaje puede editarlo. Las menciones se vuelven a evaluar con el nuevo texto.
+   *
+   * @param authorId Usuario que solicita la edición
+   * @param channelId Canal donde está el mensaje
+   * @param messageId ID del mensaje a editar
+   * @param newContent Nuevo texto del mensaje
+   * @param access Resultado de acceso al canal para validar menciones a @everyone y roles
+   */
+  static async editMessage(
+    authorId: string,
+    channelId: string,
+    messageId: string,
+    newContent: string,
+    access?: ChannelAccessResult
+  ): Promise<MessagePayload> {
+    if (!mongoose.Types.ObjectId.isValid(messageId)) {
+      throw new NotFoundError('Message not found');
+    }
+
+    const message = await Message.findOne({ _id: messageId, channelId });
+    if (!message) {
+      throw new NotFoundError('Message not found');
+    }
+
+    if (message.authorId !== authorId) {
+      throw new ForbiddenError('Only the author can edit this message');
+    }
+
+    if (typeof newContent !== 'string') {
+      throw new ValidationError('Message content must be a string');
+    }
+
+    const trimmed = newContent.trim();
+    const hasAttachments = Boolean(message.attachments && message.attachments.length > 0);
+
+    if (!hasAttachments && trimmed.length === 0) {
+      throw new ValidationError('Message content cannot be empty');
+    }
+    if (trimmed.length > 2000) {
+      throw new ValidationError('Message exceeds maximum length of 2000 characters');
+    }
+    if (/\x00/.test(newContent)) {
+      throw new ValidationError('Message cannot contain null characters');
+    }
+
+    const parsed = parseMentions(trimmed);
+    let roleIds: string[] = [];
+    let everyone = false;
+    if (parsed.everyone || parsed.roleIds.length > 0) {
+      const { canMentionEveryone, mentionableRoleIds } =
+        access ?? (await PermissionService.getChannelAccess(authorId, channelId));
+      if (canMentionEveryone) {
+        everyone = parsed.everyone;
+        roleIds = parsed.roleIds.filter((roleId) => mentionableRoleIds.includes(roleId));
+      }
+    }
+
+    message.content = trimmed;
+    message.edited = true;
+    message.editedAt = new Date();
+    message.mentionUserIds = parsed.userIds.length > 0 ? parsed.userIds : undefined;
+    message.mentionRoleIds = roleIds.length > 0 ? roleIds : undefined;
+    message.mentionEveryone = everyone ? true : undefined;
+
+    await message.save();
+
+    const payload = toPayload(message);
+    return {
+      ...payload,
+      type: 'MESSAGE_UPDATED',
+    };
   }
 }

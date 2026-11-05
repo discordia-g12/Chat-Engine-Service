@@ -18,6 +18,8 @@ export interface IMessage extends Document {
   mentionRoleIds?: string[];
   mentionEveryone?: boolean;
   attachments?: IAttachment[];
+  edited?: boolean;
+  editedAt?: Date | null;
 }
 
 const AttachmentSchema = new Schema({
@@ -78,6 +80,8 @@ const MessageSchema: Schema = new Schema({
   mentionRoleIds: { type: [String], default: undefined },
   mentionEveryone: { type: Boolean, default: undefined },
   attachments: { type: [AttachmentSchema], default: undefined },
+  edited: { type: Boolean, default: false },
+  editedAt: { type: Date, default: null },
 }, {
   strict: true,
 });

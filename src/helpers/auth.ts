@@ -12,6 +12,8 @@ declare module 'fastify' {
     canSend?: boolean;
     /** When the caller's mute expires, if the mute is the only thing preventing them from writing. */
     mutedUntil?: Date;
+    /** Full channel access result resolved during access validation. */
+    channelAccess?: ChannelAccessResult;
   }
 }
 
@@ -55,4 +57,5 @@ export async function channelAccessGuard(req: FastifyRequest): Promise<void> {
   req.serverId = access.serverId;
   req.canSend = access.canSend;
   req.mutedUntil = access.mutedUntil;
+  req.channelAccess = access;
 }
