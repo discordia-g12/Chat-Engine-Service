@@ -5,6 +5,7 @@ import { EventConsumer } from './services/EventConsumer';
 import historyPlugin from './plugins/history';
 import readStatesPlugin from './plugins/readStates';
 import attachmentsPlugin from './plugins/attachments';
+import conversationsPlugin from './plugins/conversations';
 import { registerErrorHandler } from './plugins/errorHandler';
 import { getRedis } from './config/redis';
 import { checkMongo, checkRedis, RedisPinger } from './config/readiness';
@@ -30,6 +31,7 @@ function buildApp(opts: BuildAppOptions = {}): FastifyInstance {
   app.register(historyPlugin);
   app.register(readStatesPlugin);
   app.register(attachmentsPlugin);
+  app.register(conversationsPlugin);
 
   app.get('/livez', async () => {
     return { status: 'ok', timestamp: new Date().toISOString() };

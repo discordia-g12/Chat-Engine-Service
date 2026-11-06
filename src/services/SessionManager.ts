@@ -1,4 +1,5 @@
 import type { WebSocket } from 'ws';
+import { isDmChannel, isInboxChannel } from '../helpers/directMessages';
 
 export interface ClientSession {
   userId: string;
@@ -95,10 +96,14 @@ export class SessionManager {
     return set ? Array.from(set) : [];
   }
 
+  /**
+   * Sesiones del usuario en canales de servidor. Las de DM e inbox quedan afuera: su `serverId` es vacío, y
+   * un evento de servidor sin `server_id` (que acá significa "todos sus servidores") no debe cerrarlas.
+   */
   static getUserSessions(userId: string, serverId?: string): ClientSession[] {
     const set = this.userSessions.get(userId);
     if (!set) return [];
-    const sessions = Array.from(set);
+    const sessions = Array.from(set).filter((s) => !isDmChannel(s.channelId) && !isInboxChannel(s.channelId));
     if (serverId) return sessions.filter(s => s.serverId === serverId);
     return sessions;
   }

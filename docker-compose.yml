@@ -44,6 +44,7 @@ services:
       - MONGO_URI=mongodb://chat-mongo:27017/chat_db
       - REDIS_URL=redis://chat-redis:6379
       - CORE_SERVICE_URL=${CORE_SERVICE_URL:-http://host.docker.internal:8080}
+      - AUTH_SERVICE_URL=${AUTH_SERVICE_URL:-http://host.docker.internal:8001}
     depends_on:
       chat-mongo:
         condition: service_healthy

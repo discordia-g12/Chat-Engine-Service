@@ -2,6 +2,7 @@ import { Message, IMessage } from '../models/Message';
 import { ChannelAccessResult, PermissionService } from './PermissionService';
 import { ForbiddenError } from '../errors';
 import { parseMentions } from '../helpers/mentions';
+import { isDmChannel } from '../helpers/directMessages';
 
 /** Menciones que notifican. Un @everyone o un rol sin permiso queda en el texto pero no acá. */
 export interface MessageMentions {
@@ -109,11 +110,25 @@ export class ChatService {
   }
 
   /**
+   * Valida un mensaje sin guardarlo. El primer mensaje de un DM se valida antes de crear la conversación,
+   * para no dejarla vacía si el texto no sirve.
+   */
+  static async validateMessage(
+    authorId: string,
+    channelId: string,
+    content: string,
+    attachments?: MessageAttachmentPayload[]
+  ): Promise<void> {
+    await new Message({ content, authorId, channelId, ...(attachments?.length ? { attachments } : {}) }).validate();
+  }
+
+  /**
    * Validates permissions and persists a new chat message into MongoDB.
    *
    * Las menciones se sacan del texto. Mencionar a @everyone o a un rol exige MENTION_EVERYONE, que se
    * consulta a Core en el momento (solo si el mensaje las tiene); sin el permiso quedan como texto plano.
-   * Las menciones de usuario no requieren permiso.
+   * Las menciones de usuario no requieren permiso. Un DM no tiene servidor: Core respondería 404, así que
+   * ahí no se consulta y @everyone y los roles quedan como texto.
    *
    * @param authorId User sending the message
    * @param channelId Target channel identifier
@@ -141,7 +156,7 @@ export class ChatService {
     const parsed = parseMentions(content);
     let roleIds: string[] = [];
     let everyone = false;
-    if (parsed.everyone || parsed.roleIds.length > 0) {
+    if (!isDmChannel(channelId) && (parsed.everyone || parsed.roleIds.length > 0)) {
       const { canMentionEveryone, mentionableRoleIds } =
         access ?? (await PermissionService.getChannelAccess(authorId, channelId));
       if (canMentionEveryone) {

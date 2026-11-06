@@ -7,16 +7,23 @@ import {
   ForbiddenError,
   NotFoundError,
   UpstreamUnavailableError,
+  ConflictError,
 } from '../src/errors';
 import { Message } from '../src/models/Message';
 
 describe('toProblem', () => {
+  it('adds the business code only when the error has one', () => {
+    assert.strictEqual(toProblem(new ForbiddenError('no', { code: 'DM_PENDING' })).code, 'DM_PENDING');
+    assert.ok(!('code' in toProblem(new ForbiddenError('no'))));
+  });
+
   it('maps each AppError subclass to its own status and title', () => {
     const cases: [Error, number, string][] = [
       [new ValidationError('bad'), 400, 'Bad Request'],
       [new UnauthorizedError('who?'), 401, 'Unauthorized'],
       [new ForbiddenError('no'), 403, 'Forbidden'],
       [new NotFoundError('gone'), 404, 'Not Found'],
+      [new ConflictError('taken'), 409, 'Conflict'],
       [new UpstreamUnavailableError('down'), 503, 'Service Unavailable'],
     ];
     for (const [error, status, title] of cases) {

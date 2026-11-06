@@ -345,6 +345,67 @@ describe('PubSubService and Multi-Node Redis Pub/Sub', () => {
     assert.strictEqual(JSON.parse(aliceReceived[0]).content, 'Message from Node B');
   });
 
+  it('uses inbox:<userId> as the Redis key of the socket per user', () => {
+    assert.strictEqual(PubSubService.channelKey('inbox:alice'), 'inbox:alice');
+    assert.strictEqual(PubSubService.channelIdFromKey('inbox:alice'), 'inbox:alice');
+  });
+
+  it('delivers an inbox event once, to the node that holds the socket, with two instances', async () => {
+    const sharedBus = new EventEmitter();
+    const nodeA = new FakeRedis();
+    const nodeB = new FakeRedis();
+    const subscriber = new FakeRedis();
+    for (const node of [nodeA, nodeB]) {
+      node.publish = async (channel: string, message: string) => {
+        node.published.push({ channel, message });
+        sharedBus.emit('published', channel, message);
+        return 1;
+      };
+    }
+    // Esta instancia recibe solo lo que tiene suscripto, como en Redis
+    sharedBus.on('published', (channel: string, message: string) => {
+      if (subscriber.subscribedChannels.has(channel)) subscriber.emit('message', channel, message);
+    });
+
+    await PubSubService.start({
+      publisher: nodeA as unknown as Redis,
+      subscriber: subscriber as unknown as Redis,
+      logger: silentLogger,
+    });
+
+    const ws = createMockSocket();
+    SessionManager.register({
+      userId: 'alice',
+      channelId: 'inbox:alice',
+      serverId: '',
+      socket: ws,
+      canSend: false,
+      connectedAt: new Date(),
+    });
+    await flushAsync();
+    assert.ok(subscriber.subscribedChannels.has('inbox:alice'));
+
+    const received = (ws as unknown as { _sentMessages: string[] })._sentMessages;
+
+    // Publicado por esta instancia: llega una sola vez (por Redis, no además en local)
+    await PubSubService.publishToInbox('alice', { type: 'DM_MESSAGE', from: 'node-a' });
+    assert.deepStrictEqual(nodeA.published.map((p) => p.channel), ['inbox:alice']);
+    assert.strictEqual(received.length, 1);
+
+    // Publicado por otra instancia
+    await nodeB.publish('inbox:alice', JSON.stringify({ type: 'DM_MESSAGE', from: 'node-b' }));
+    assert.strictEqual(received.length, 2);
+    assert.strictEqual(JSON.parse(received[1]).from, 'node-b');
+
+    // El inbox de otro usuario no le llega
+    await nodeB.publish('inbox:bob', JSON.stringify({ type: 'DM_MESSAGE' }));
+    assert.strictEqual(received.length, 2);
+
+    SessionManager.unregister(ws);
+    await flushAsync();
+    assert.ok(!subscriber.subscribedChannels.has('inbox:alice'));
+  });
+
   it('falls back to local broadcast when PubSubService is not started', async () => {
     const ws = createMockSocket();
     SessionManager.register({

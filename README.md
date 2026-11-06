@@ -3,11 +3,13 @@
 Servicio de mensajería en tiempo real de Discordia (Node.js 20, TypeScript, Fastify 5). Cada canal de texto
 tiene un WebSocket: el servicio guarda los mensajes en MongoDB y los reparte a los conectados (localmente y entre
 múltiples instancias mediante Redis Pub/Sub, según el ADR 0006). Al reconectar,
-el cliente recupera los mensajes que se perdió. Además expone el historial paginado.
+el cliente recupera los mensajes que se perdió. Además expone el historial paginado, los mensajes directos y
+la presencia.
 
 No decide permisos: le pregunta a Server-Roles-Core si el usuario puede ver y escribir en el canal, y escucha
 sus eventos (`member.*`, `role.*`) por RabbitMQ para aplicar en vivo baneos, expulsiones, silencios y
-cambios de rol.
+cambios de rol. En los mensajes directos tampoco decide: le pregunta a Auth-User-Service quién es el usuario
+y qué relación tiene con el otro.
 
 ## Requisitos
 
@@ -15,6 +17,8 @@ cambios de rol.
 - Docker, para MongoDB y Redis.
 - **Server-Roles-Core-Service** corriendo, para abrir un canal: sin él, el acceso al canal responde `503`.
   Con su `docker compose up -d` queda en `localhost:8080`.
+- **Auth-User-Service** corriendo, para los mensajes directos: sin él, los DMs responden `503` y los canales de
+  servidor siguen funcionando.
 - RabbitMQ es opcional: sin él, el chat funciona igual, pero los baneos y silencios no se aplican en vivo.
 
 ## Levantarlo en local
@@ -25,8 +29,8 @@ cambios de rol.
 npm install
 docker compose up -d chat-mongo chat-redis      # MongoDB en 27017 y Redis en 6379
 
-# El servicio no lee .env: las variables van exportadas o en la línea
-CORE_SERVICE_URL=http://localhost:8080 npm run dev
+# El servicio no lee .env: las variables van exportadas o en la línea (referencia en .env.example)
+CORE_SERVICE_URL=http://localhost:8080 AUTH_SERVICE_URL=http://localhost:8000 npm run dev
 ```
 
 ### Todo en contenedores
@@ -35,8 +39,9 @@ CORE_SERVICE_URL=http://localhost:8080 npm run dev
 docker compose up -d --build        # MongoDB, Redis y el servicio en localhost:3000
 ```
 
-La app del compose llega a Server-Roles en `http://host.docker.internal:8080` (se cambia con
-`CORE_SERVICE_URL`). Usa la base `chat_db`; `npm run dev`, por defecto, `discordia_chat`: los mensajes de
+La app del compose llega a Server-Roles en `http://host.docker.internal:8080` y a Auth en
+`http://host.docker.internal:8001`, el puerto que publica Auth en el stack de `deploy/` (el 8000 ahí es Kong,
+que no expone `/internal`; se cambian con `CORE_SERVICE_URL` y `AUTH_SERVICE_URL`). Usa la base `chat_db`; `npm run dev`, por defecto, `discordia_chat`: los mensajes de
 una no aparecen en la otra.
 
 Bajar todo: `docker compose down` (con `-v` también borra los datos).
@@ -77,6 +82,7 @@ Para levantarlo junto con el Gateway y los demás servicios, usar el compose del
 | `MONGO_URI` | `mongodb://localhost:27017/discordia_chat` | Historial de mensajes. En producción, MongoDB Atlas |
 | `REDIS_URL` | `redis://localhost:6379` | Redis para pub/sub de mensajería multi-instancia y verificación en `/readyz` |
 | `CORE_SERVICE_URL` | `http://localhost:8000` | Server-Roles-Core, para `/internal/channels/{id}/access` y `/internal/users/{id}/visible-channels`. En local, `http://localhost:8080` |
+| `AUTH_SERVICE_URL` | `http://localhost:8000` | Auth-User-Service, para `/internal/users/{id}/canonical` y `/internal/relations`. Timeout de 2 s; si no responde, los DMs dan `503` |
 | `RABBITMQ_URL` | `amqp://admin:admin@rabbitmq:5672/` | Broker de los eventos de Server-Roles |
 | `RABBITMQ_EXCHANGE` | `server.events` | Exchange del que consume |
 | `RABBITMQ_QUEUE` | `chat_engine_events` | Cola durable del servicio |
@@ -99,14 +105,58 @@ En producción está detrás de Kong, bajo `/api/v1/chat` (Kong saca ese prefijo
 - `POST /channels/:channelId/read`: marca el canal leído hasta `messageId` (body opcional) o hasta el
   último mensaje. Nunca retrocede.
 - `POST /read-states/read-all`: marca leídos todos los canales que el usuario puede ver.
+- `GET /conversations`: conversaciones directas del usuario, las más recientes primero, sin las que rechazó.
+- `PUT /conversations/with/:userId`: `{ conversation | null, canMessage }`. No crea nada; si ya son amigos, pasa
+  una conversación pendiente o rechazada a `accepted`.
+- `POST /conversations` con `{ recipientId, content, attachments? }`: manda el primer mensaje. Crea la
+  conversación (`accepted` entre amigos, si no `pending`) o reutiliza la que hay: `201 { conversation, message }`.
+- `POST /conversations/:id/accept` y `POST /conversations/:id/decline`: responden una solicitud de mensaje. Solo
+  el destinatario. Aceptar no los hace amigos; rechazar la saca de su lista y a quien la inició no se le avisa.
+  Si después escribe quien rechazó, la conversación pasa a `accepted`: escribir es arrepentirse.
+- `POST /presence` con `{ userIds }` (hasta 100): `{ [userId]: "online" | "offline" }`.
+- `GET /inbox/ws`: WebSocket del usuario. Ver abajo.
 - `GET /livez`: el proceso está vivo. No consulta Mongo ni Redis, para que una caída de ellos no reinicie el
   contenedor.
 - `GET /readyz`: ping a Mongo y Redis (1 s cada uno). `200` si los dos responden; `503` con el detalle si
   falla alguno. RabbitMQ se informa pero no define si está listo: sin eventos el chat sigue andando.
 
 Los errores siguen RFC 7807 (`application/problem+json`): `400` datos inválidos, `401` sin usuario, `403`
-sin acceso al canal, `404` canal inexistente o mensaje inexistente y `503` si Server-Roles no responde. Por el WebSocket, un error
-llega como `{"error": "...", "status": 403}`.
+sin acceso al canal, `404` canal inexistente o mensaje inexistente y `503` si Server-Roles (o Auth, en un DM) no
+responde. Por el WebSocket, un error llega como `{"error": "...", "status": 403}`.
+
+### Mensajes directos
+
+Una conversación tiene un id `dm-<ObjectId>` y funciona como un canal: con ese id andan `GET` y
+`POST /channels/:id/messages`, `POST /channels/:id/read`, `GET /channels/:id/ws` y los adjuntos. El acceso lo
+decide ser participante, sin consultar a Core. `Message` y `ReadState` no cambian; las conversaciones están en la
+colección `conversations`, con un índice único por par de usuarios.
+
+Los participantes se guardan con su id canónico: `X-User-Id` puede ser un alias si el login es federado. En cada
+envío, por REST o WebSocket, se vuelve a preguntar la relación a Auth. Los rechazos traen un campo `code`, en
+Problem Details y en el error del WebSocket:
+
+| Status | `code` | Cuándo |
+|---|---|---|
+| `403` | `DM_NOT_DELIVERABLE` | Hay un bloqueo en cualquier sentido, o el otro está suspendido o no existe. Es el mismo error en todos los casos: nunca dice "te bloquearon" |
+| `403` | `DM_PENDING` | La conversación todavía no se aceptó (si escribe quien la rechazó, en cambio, se acepta y el mensaje sale) |
+| `503` | | Auth no responde. No se guarda ni se entrega nada |
+
+No leídos: `unreadCount` de cada conversación usa el mismo cálculo que `/unread`, que no incluye DMs.
+A diferencia de un canal, una conversación sin registro de lectura no arranca leída.
+
+### Inbox y presencia
+
+`GET /inbox/ws` es un socket por usuario, para enterarse de lo que pasa en conversaciones que no tiene abiertas.
+Solo recibe, por el canal de Redis `inbox:<userId>`:
+
+```json
+{ "type": "DM_MESSAGE", "conversationId": "dm-…", "message": {} }
+{ "type": "DM_CONVERSATION", "conversation": {} }
+```
+
+Al reconectar, el cliente vuelve a pedir `GET /conversations`. Mientras el inbox está conectado, la clave Redis
+`presence:<userId>` tiene un TTL de 60 s y la renueva cada pong del heartbeat. Al cerrarse el último socket de esa
+instancia se borra; si el usuario tiene otro en otra instancia, vuelve en el próximo ping.
 
 ### Mensajes del servidor por el WebSocket
 
@@ -152,14 +202,18 @@ src/
 ├── app.ts                     app de Fastify, /livez y /readyz
 ├── plugins/websocket.ts       WebSocket del canal
 ├── plugins/history.ts         historial
+├── plugins/conversations.ts   conversaciones directas y presencia
 ├── plugins/errorHandler.ts    errores RFC 7807
 ├── services/ChatService.ts    guardar mensajes, historial y mensajes perdidos
 ├── services/SessionManager.ts sesiones abiertas por canal y usuario (en memoria)
 ├── services/PubSubService.ts   distribución de mensajes multi-nodo (Redis Pub/Sub)
 ├── services/PermissionService.ts  consulta a Server-Roles
+├── services/ConversationService.ts  conversaciones directas y solicitud de mensaje
+├── services/RelationsService.ts  consulta a Auth: id canónico y relación entre usuarios
+├── services/PresenceService.ts  presencia en Redis
 ├── services/EventConsumer.ts  eventos de RabbitMQ
 ├── helpers/                   identidad, permisos y heartbeat
-├── models/Message.ts          modelo de Mongoose
+├── models/                    modelos de Mongoose (Message, ReadState, Conversation)
 └── config/                    Mongo, Redis y readiness
 tests/
 ```

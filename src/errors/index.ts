@@ -2,10 +2,13 @@
 export abstract class AppError extends Error {
   abstract readonly statusCode: number;
   abstract readonly title: string;
+  /** Código de negocio para que el cliente distinga el caso (extensión de RFC 7807), p. ej. DM_PENDING. */
+  readonly code?: string;
 
-  constructor(message: string, options?: ErrorOptions) {
+  constructor(message: string, options?: ErrorOptions & { code?: string }) {
     super(message, options);
     this.name = new.target.name;
+    this.code = options?.code;
   }
 }
 
@@ -29,6 +32,11 @@ export class NotFoundError extends AppError {
   readonly title = 'Not Found';
 }
 
+export class ConflictError extends AppError {
+  readonly statusCode = 409;
+  readonly title = 'Conflict';
+}
+
 export class PayloadTooLargeError extends AppError {
   readonly statusCode = 413;
   readonly title = 'Payload Too Large';
@@ -47,6 +55,7 @@ export interface ProblemDetails {
   status: number;
   detail: string;
   instance?: string;
+  code?: string;
 }
 
 type MongooseValidationError = Error & { errors: Record<string, { message: string }> };
@@ -57,7 +66,14 @@ function isMongooseValidationError(error: unknown): error is MongooseValidationE
 
 export function toProblem(error: unknown, instance?: string): ProblemDetails {
   if (error instanceof AppError) {
-    return { type: 'about:blank', title: error.title, status: error.statusCode, detail: error.message, instance };
+    return {
+      type: 'about:blank',
+      title: error.title,
+      status: error.statusCode,
+      detail: error.message,
+      instance,
+      ...(error.code ? { code: error.code } : {}),
+    };
   }
 
   if (isMongooseValidationError(error)) {
