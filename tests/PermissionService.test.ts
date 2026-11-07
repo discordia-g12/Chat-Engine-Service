@@ -37,7 +37,17 @@ describe('PermissionService', () => {
       mutedUntil: undefined,
       canMentionEveryone: false,
       mentionableRoleIds: [],
+      canManageMessages: false,
     });
+  });
+
+  it('returns whether the user can manage messages (200, can_manage_messages true)', async () => {
+    mock.method(globalThis, 'fetch', async () =>
+      ok({ server_id: 'srv-1', can_send: true, can_manage_messages: true })
+    );
+
+    const result = await PermissionService.getChannelAccess('moderator', 'channel-1');
+    assert.strictEqual(result.canManageMessages, true);
   });
 
   it('returns whether the user can mention @everyone and which roles', async () => {
@@ -92,7 +102,7 @@ describe('PermissionService', () => {
     mock.method(globalThis, 'fetch', async () => ({ status: 403 }) as Response);
 
     const result = await PermissionService.getChannelAccess('banned-user', 'channel-1');
-    assert.deepStrictEqual(result, { allowed: false, canSend: false, canMentionEveryone: false, mentionableRoleIds: [] });
+    assert.deepStrictEqual(result, { allowed: false, canSend: false, canMentionEveryone: false, mentionableRoleIds: [], canManageMessages: false });
   });
 
   it('throws if the channel does not exist (404)', async () => {

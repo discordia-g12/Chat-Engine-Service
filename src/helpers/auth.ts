@@ -13,6 +13,8 @@ declare module 'fastify' {
     serverId?: string;
     /** Whether the caller can write in the channel (they can always read once the guard passes). */
     canSend?: boolean;
+    /** Whether the caller has MANAGE_MESSAGES or admin rights to delete messages of others. */
+    canManageMessages?: boolean;
     /** When the caller's mute expires, if the mute is the only thing preventing them from writing. */
     mutedUntil?: Date;
     /** Full channel access result resolved during access validation. */
@@ -78,6 +80,7 @@ export async function channelAccessGuard(req: FastifyRequest): Promise<void> {
     req.userId = canonicalId;
     req.serverId = '';
     req.canSend = true;
+    req.canManageMessages = false;
     return;
   }
 
@@ -87,6 +90,7 @@ export async function channelAccessGuard(req: FastifyRequest): Promise<void> {
   req.serverId = access.serverId;
   req.canSend = access.canSend;
   req.mutedUntil = access.mutedUntil;
+  req.canManageMessages = access.canManageMessages;
   req.channelAccess = access;
 }
 

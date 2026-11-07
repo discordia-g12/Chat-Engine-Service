@@ -20,6 +20,8 @@ export interface IMessage extends Document {
   attachments?: IAttachment[];
   edited?: boolean;
   editedAt?: Date | null;
+  isDeleted?: boolean;
+  deletedAt?: Date | null;
 }
 
 const AttachmentSchema = new Schema({
@@ -36,7 +38,7 @@ const MessageSchema: Schema = new Schema({
     required: [
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       function (this: any) {
-        return !this.attachments || this.attachments.length === 0;
+        return !this.isDeleted && (!this.attachments || this.attachments.length === 0);
       },
       'Content is required',
     ],
@@ -47,6 +49,9 @@ const MessageSchema: Schema = new Schema({
       {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         validator: function (this: any, v: string) {
+          if (this.isDeleted) {
+            return true;
+          }
           if (!this.attachments || this.attachments.length === 0) {
             return typeof v === 'string' && v.trim().length >= 1;
           }
@@ -82,6 +87,8 @@ const MessageSchema: Schema = new Schema({
   attachments: { type: [AttachmentSchema], default: undefined },
   edited: { type: Boolean, default: false },
   editedAt: { type: Date, default: null },
+  isDeleted: { type: Boolean, default: false },
+  deletedAt: { type: Date, default: null },
 }, {
   strict: true,
 });

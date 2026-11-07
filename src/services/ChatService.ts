@@ -30,23 +30,28 @@ export interface MessagePayload {
   attachments?: MessageAttachmentPayload[];
   edited?: boolean;
   editedAt?: Date | null;
+  isDeleted?: boolean;
+  deletedAt?: Date | null;
   type?: string;
 }
 
 function toPayload(msg: IMessage): MessagePayload {
+  const isDeleted = msg.isDeleted === true;
   return {
     id: msg._id.toString(),
-    content: msg.content,
+    content: isDeleted ? '' : msg.content,
     authorId: msg.authorId,
     channelId: msg.channelId,
     createdAt: msg.createdAt,
-    mentions: {
-      users: msg.mentionUserIds ?? [],
-      roles: msg.mentionRoleIds ?? [],
-      everyone: msg.mentionEveryone === true,
-    },
-    ...(msg.edited ? { edited: true, editedAt: msg.editedAt ?? null } : {}),
-    ...(msg.attachments && msg.attachments.length > 0
+    mentions: isDeleted
+      ? { users: [], roles: [], everyone: false }
+      : {
+          users: msg.mentionUserIds ?? [],
+          roles: msg.mentionRoleIds ?? [],
+          everyone: msg.mentionEveryone === true,
+        },
+    ...(msg.edited && !isDeleted ? { edited: true, editedAt: msg.editedAt ?? null } : {}),
+    ...(msg.attachments && msg.attachments.length > 0 && !isDeleted
       ? {
           attachments: msg.attachments.map((att) => ({
             id: att.id,
@@ -57,6 +62,7 @@ function toPayload(msg: IMessage): MessagePayload {
           })),
         }
       : {}),
+    ...(isDeleted ? { type: 'deleted', isDeleted: true, deletedAt: msg.deletedAt ?? null } : {}),
   };
 }
 
@@ -213,6 +219,10 @@ export class ChatService {
       throw new NotFoundError('Message not found');
     }
 
+    if (message.isDeleted) {
+      throw new ValidationError('Cannot edit a deleted message');
+    }
+
     if (message.authorId !== authorId) {
       throw new ForbiddenError('Only the author can edit this message');
     }
@@ -259,6 +269,69 @@ export class ChatService {
     return {
       ...payload,
       type: 'MESSAGE_UPDATED',
+    };
+  }
+
+  /**
+   * Marca un mensaje como eliminado (soft delete).
+   * En canales de servidor lo puede hacer el autor o un moderador (con MANAGE_MESSAGES o admin).
+   * En DMs únicamente el autor del mensaje.
+   *
+   * @param userId Usuario que solicita la eliminación
+   * @param channelId Canal donde reside el mensaje
+   * @param messageId ID del mensaje a eliminar
+   * @param canManageMessages Si el usuario tiene permisos de moderación en el canal
+   */
+  static async deleteMessage(
+    userId: string,
+    channelId: string,
+    messageId: string,
+    canManageMessages = false
+  ): Promise<MessagePayload> {
+    if (!mongoose.Types.ObjectId.isValid(messageId)) {
+      throw new NotFoundError('Message not found');
+    }
+
+    const message = await Message.findOne({ _id: messageId, channelId });
+    if (!message) {
+      throw new NotFoundError('Message not found');
+    }
+
+    if (message.isDeleted) {
+      const payload = toPayload(message);
+      return {
+        ...payload,
+        type: 'MESSAGE_DELETED',
+      };
+    }
+
+    const isAuthor = message.authorId === userId;
+    const isDm = isDmChannel(channelId);
+
+    if (isDm) {
+      if (!isAuthor) {
+        throw new ForbiddenError('Only the author can delete this message');
+      }
+    } else {
+      if (!isAuthor && !canManageMessages) {
+        throw new ForbiddenError('You do not have permission to delete this message');
+      }
+    }
+
+    message.isDeleted = true;
+    message.deletedAt = new Date();
+    message.content = '';
+    message.attachments = [];
+    message.mentionUserIds = undefined;
+    message.mentionRoleIds = undefined;
+    message.mentionEveryone = undefined;
+
+    await message.save();
+
+    const payload = toPayload(message);
+    return {
+      ...payload,
+      type: 'MESSAGE_DELETED',
     };
   }
 }

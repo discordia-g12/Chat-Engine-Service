@@ -36,5 +36,35 @@ export default async function messagesPlugin(app: FastifyInstance) {
 
     return updatedPayload;
   });
+
+  app.delete('/channels/:channelId/messages/:messageId', { preValidation: channelAccessGuard }, async (req) => {
+    const { channelId, messageId } = req.params as { channelId: string; messageId: string };
+    const userId = req.userId;
+
+    const deletedPayload = await ChatService.deleteMessage(
+      userId,
+      channelId,
+      messageId,
+      req.canManageMessages ?? false
+    );
+    await PubSubService.publish(channelId, deletedPayload);
+
+    if (isDmChannel(channelId)) {
+      const convId = parseDmChannelId(channelId);
+      if (convId) {
+        const conv = await Conversation.findById(convId);
+        if (conv) {
+          if (conv.lastMessageId?.toString() === messageId) {
+            conv.lastMessagePreview = '/ este mensaje fue eliminado';
+            await conv.save();
+          }
+          const inboxEvent = { type: 'DM_MESSAGE_DELETED', conversationId: channelId, message: deletedPayload };
+          await Promise.all(conv.participantIds.map((id) => PubSubService.publishToInbox(id, inboxEvent)));
+        }
+      }
+    }
+
+    return deletedPayload;
+  });
 }
 
