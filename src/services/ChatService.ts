@@ -237,7 +237,7 @@ export class ChatService {
     const parsed = parseMentions(trimmed);
     let roleIds: string[] = [];
     let everyone = false;
-    if (parsed.everyone || parsed.roleIds.length > 0) {
+    if (!isDmChannel(channelId) && (parsed.everyone || parsed.roleIds.length > 0)) {
       const { canMentionEveryone, mentionableRoleIds } =
         access ?? (await PermissionService.getChannelAccess(authorId, channelId));
       if (canMentionEveryone) {
