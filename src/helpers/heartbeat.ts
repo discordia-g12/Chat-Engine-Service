@@ -7,12 +7,14 @@ export const DEFAULT_PING_INTERVAL_MS = 30_000;
  * cada `intervalMs`. Si el cliente no respondió el anterior, la conexión está muerta (sin red, app
  * suspendida) y se termina, para no seguir mandándole mensajes.
  *
+ * @param onAlive se llama con cada pong (el inbox renueva ahí la presencia).
  * @returns función que frena el heartbeat; llamarla al cerrarse la conexión.
  */
-export function startHeartbeat(socket: WebSocket, intervalMs: number): () => void {
+export function startHeartbeat(socket: WebSocket, intervalMs: number, onAlive?: () => void): () => void {
   let alive = true;
   const onPong = () => {
     alive = true;
+    onAlive?.();
   };
   socket.on('pong', onPong);
 

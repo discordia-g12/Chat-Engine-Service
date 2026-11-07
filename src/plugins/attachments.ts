@@ -5,6 +5,8 @@ import { channelAccessGuard } from '../helpers/auth';
 import { ForbiddenError, PayloadTooLargeError, ValidationError } from '../errors';
 import { StorageService, MAX_ATTACHMENT_SIZE } from '../services/StorageService';
 import { fileSystem as fs } from '../helpers/fs';
+import { ConversationService } from '../services/ConversationService';
+import { isDmChannel } from '../helpers/directMessages';
 
 export default async function attachmentsPlugin(app: FastifyInstance) {
   await app.register(multipart, {
@@ -41,6 +43,10 @@ export default async function attachmentsPlugin(app: FastifyInstance) {
       }
 
       const { channelId } = req.params as { channelId: string };
+      if (isDmChannel(channelId)) {
+        await ConversationService.assertCanSend(req.userId, channelId);
+      }
+
       const fileData = await req.file();
       if (!fileData) {
         throw new ValidationError('No file was uploaded');
