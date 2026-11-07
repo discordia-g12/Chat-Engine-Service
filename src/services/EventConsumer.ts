@@ -9,8 +9,16 @@ export interface EventPayload {
   permissions_bitmask?: number;
   reason?: string;
   expires_at?: string;
+  /** user.suspended: todas las identidades de la cuenta (la principal y sus alias federados). */
+  identities?: unknown;
   [key: string]: unknown;
 }
+
+/**
+ * Cierre por cuenta suspendida por la plataforma (user.suspended de Auth-User). El cliente no reintenta:
+ * Kong rechaza sus tokens con 403 account-suspended.
+ */
+export const ACCOUNT_SUSPENDED_CLOSE_CODE = 4010;
 
 const RECONNECT_BASE_MS = 1000;
 const RECONNECT_MAX_MS = 30_000;
@@ -32,6 +40,8 @@ export interface ConsumerLogger {
 export interface EventConsumerOptions {
   url?: string;
   exchange?: string;
+  /** Exchange de Auth-User (user.suspended). */
+  userExchange?: string;
   queue?: string;
   logger?: ConsumerLogger;
   /** Para tests: reemplaza amqplib.connect. */
@@ -41,6 +51,18 @@ export interface EventConsumerOptions {
 }
 
 type ResolvedOptions = Required<Omit<EventConsumerOptions, 'connect'>> & Pick<EventConsumerOptions, 'connect'>;
+
+/** user_id más las identidades del evento, sin repetir y solo strings no vacíos. */
+function suspendedIdentities(payload: EventPayload): string[] {
+  const ids = new Set<string>();
+  if (typeof payload.user_id === 'string' && payload.user_id) ids.add(payload.user_id);
+  if (Array.isArray(payload.identities)) {
+    for (const id of payload.identities) {
+      if (typeof id === 'string' && id) ids.add(id);
+    }
+  }
+  return [...ids];
+}
 
 export class EventConsumer {
   private static connection: ChannelModel | null = null;
@@ -146,6 +168,15 @@ export class EventConsumer {
     const userId = payload.user_id;
     const serverId = payload.server_id;
 
+    // Cuenta suspendida por el staff (CA 2 de "Suspender usuario"): se cierran todas sus conexiones, en
+    // cualquier servidor, DMs y bandeja, de cada una de sus identidades
+    if (routingKey === 'user.suspended') {
+      for (const id of suspendedIdentities(payload)) {
+        SessionManager.disconnectAllSessions(id, 'Account suspended', ACCOUNT_SUSPENDED_CLOSE_CODE);
+      }
+      return;
+    }
+
     // Cambió lo que puede hacer un rol (o se borró): afecta a todos los que lo tengan en el servidor
     if (routingKey === 'role.permissions_updated' || routingKey === 'role.deleted') {
       if (serverId) await this.recheckSendPermission(SessionManager.getServerSessions(serverId));
@@ -198,7 +229,8 @@ export class EventConsumer {
   }
 
   /**
-   * Conecta a RabbitMQ y consume los eventos member.* y role.* de Server-Roles. No bloquea: el chat arranca
+   * Conecta a RabbitMQ y consume los eventos member.* y role.* de Server-Roles, y user.suspended de
+   * Auth-User (exchange user.events), todos en la misma cola. No bloquea: el chat arranca
    * aunque RabbitMQ (otro nodo) esté caído, y se reintenta para siempre con backoff exponencial.
    * Si la conexión se cae después, vuelve a conectar sola.
    *
@@ -210,6 +242,7 @@ export class EventConsumer {
     this.options = {
       url: options.url || process.env.RABBITMQ_URL || 'amqp://admin:admin@rabbitmq:5672/',
       exchange: options.exchange || process.env.RABBITMQ_EXCHANGE || 'server.events',
+      userExchange: options.userExchange || process.env.RABBITMQ_USER_EXCHANGE || 'user.events',
       queue: options.queue || process.env.RABBITMQ_QUEUE || 'chat_engine_events',
       logger: options.logger || console,
       connect: options.connect,
@@ -266,11 +299,15 @@ export class EventConsumer {
 
     try {
       const channel = await conn.createChannel();
+      // Mismas opciones con las que lo declara Auth-User (topic, durable): si no coinciden, RabbitMQ cierra el canal
+      await channel.assertExchange(opts.userExchange, 'topic', { durable: true });
       await channel.assertExchange(opts.exchange, 'topic', { durable: true });
       const q = await channel.assertQueue(opts.queue, { durable: true });
       await channel.bindQueue(q.queue, opts.exchange, 'member.*');
       // Cambios de permisos de un rol: hay que volver a evaluar quién puede escribir
       await channel.bindQueue(q.queue, opts.exchange, 'role.*');
+      // Cuenta suspendida por la plataforma: cerrar todas sus conexiones
+      await channel.bindQueue(q.queue, opts.userExchange, 'user.suspended');
 
       await channel.consume(q.queue, (msg: ConsumeMessage | null) => {
         if (!msg) return;
