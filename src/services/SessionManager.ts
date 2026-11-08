@@ -156,6 +156,20 @@ export class SessionManager {
     }
   }
 
+  /**
+   * Cierra TODAS las sesiones del usuario: canales de cualquier servidor, DMs y bandeja. A diferencia de
+   * disconnectUser (eventos de servidor, que no tocan DMs ni bandeja), es para cuando la cuenta entera queda
+   * afuera: suspensión por la plataforma.
+   */
+  static disconnectAllSessions(userId: string, reason: string, code: number): void {
+    for (const session of Array.from(this.userSessions.get(userId) ?? [])) {
+      if (session.socket.readyState === 1) {
+        session.socket.close(code, reason);
+      }
+      this.unregister(session.socket);
+    }
+  }
+
   static clear(): void {
     this.channelSockets.clear();
     this.userSessions.clear();

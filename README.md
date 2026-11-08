@@ -85,6 +85,7 @@ Para levantarlo junto con el Gateway y los demás servicios, usar el compose del
 | `AUTH_SERVICE_URL` | `http://localhost:8000` | Auth-User-Service, para `/internal/users/{id}/canonical` y `/internal/relations`. Timeout de 2 s; si no responde, los DMs dan `503` |
 | `RABBITMQ_URL` | `amqp://admin:admin@rabbitmq:5672/` | Broker de los eventos de Server-Roles |
 | `RABBITMQ_EXCHANGE` | `server.events` | Exchange del que consume |
+| `RABBITMQ_USER_EXCHANGE` | `user.events` | Exchange de Auth-User, del que consume `user.suspended` |
 | `RABBITMQ_QUEUE` | `chat_engine_events` | Cola durable del servicio |
 
 ## API
@@ -165,14 +166,18 @@ instancia se borra; si el usuario tiene otro en otra instancia, vuelve en el pr�
 | `{"type":"PERMISSIONS_UPDATED","canSend":false}` | Al conectar, si el usuario puede leer pero no escribir (silenciado o sin `SEND_MESSAGES`), y cada vez que eso cambia |
 | Cierre `4003` | Lo banearon del servidor (`member.banned`) |
 | Cierre `4002` | Lo expulsaron o abandonó el servidor (`member.kicked`, `member.left`) |
+| Cierre `4010` | El staff suspendió la cuenta (`user.suspended`). Se cierran todas sus conexiones; reconectar no sirve, Kong rechaza sus tokens |
 
 Cada 30 s el servidor manda un ping de protocolo y cierra las conexiones que no responden (evita el corte de
 Cloudflare a los ~100 s).
 
 ### Eventos que consume
 
-Cola `chat_engine_events`, enlazada a `member.*` y `role.*` del exchange `server.events`:
+Cola `chat_engine_events`, enlazada a `member.*` y `role.*` del exchange `server.events`, y a
+`user.suspended` del exchange `user.events` (Auth-User):
 
+- `user.suspended`: cierra con `4010` todas las sesiones de la cuenta (canales, DMs y bandeja) de cada una
+  de sus identidades (`identities`, la principal y sus alias federados);
 - `member.banned`, `member.kicked` y `member.left`: cierra las sesiones de ese usuario en ese servidor;
 - `member.muted` y `member.unmuted`: bloquea o habilita la escritura, y programa el fin del silencio;
 - `member.role_assigned`, `member.role_removed`, `role.permissions_updated` y `role.deleted`: vuelve a

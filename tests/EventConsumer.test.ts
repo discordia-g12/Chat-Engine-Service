@@ -1,8 +1,10 @@
 import { describe, it, beforeEach, afterEach, mock } from 'node:test';
 import assert from 'node:assert';
-import { EventConsumer, type EventPayload } from '../src/services/EventConsumer';
+import { ACCOUNT_SUSPENDED_CLOSE_CODE, EventConsumer, type EventPayload } from '../src/services/EventConsumer';
 import { PermissionService } from '../src/services/PermissionService';
 import { SessionManager } from '../src/services/SessionManager';
+import { inboxChannelId, toDmChannelId } from '../src/helpers/directMessages';
+import { Types } from 'mongoose';
 import type { WebSocket } from 'ws';
 
 function createMockSocket(): WebSocket {
@@ -343,5 +345,54 @@ describe('EventConsumer', () => {
     await EventConsumer.handleEvent('member.banned', {} as EventPayload);
     await EventConsumer.handleEvent('unknown.event', { user_id: 'u1' });
     await EventConsumer.handleEvent('role.permissions_updated', {});
+  });
+});
+
+describe('EventConsumer: cuenta suspendida (user.suspended de Auth-User)', () => {
+  beforeEach(() => SessionManager.clear());
+
+  const closedWith = (socket: WebSocket) =>
+    (socket as unknown as { _closedWith: () => { code: number; reason: string } | null })._closedWith();
+
+  const register = (userId: string, channelId: string, serverId: string) => {
+    const socket = createMockSocket();
+    SessionManager.register({ userId, channelId, serverId, socket, canSend: true, connectedAt: new Date() });
+    return socket;
+  };
+
+  it('cierra todas las conexiones de la cuenta, en cualquier servidor, DMs y bandeja, con 4010', async () => {
+    const inServer = register('auth0|u1', 'chan-1', 'srv-1');
+    const inOtherServer = register('auth0|u1', 'chan-2', 'srv-2');
+    const dm = register('auth0|u1', toDmChannelId(new Types.ObjectId()), '');
+    const inbox = register('auth0|u1', inboxChannelId('auth0|u1'), '');
+    const someoneElse = register('auth0|u2', 'chan-1', 'srv-1');
+
+    await EventConsumer.handleEvent('user.suspended', { user_id: 'auth0|u1', identities: ['auth0|u1'] });
+
+    for (const socket of [inServer, inOtherServer, dm, inbox]) {
+      assert.deepStrictEqual(closedWith(socket), { code: ACCOUNT_SUSPENDED_CLOSE_CODE, reason: 'Account suspended' });
+    }
+    assert.strictEqual(closedWith(someoneElse), null);
+    assert.strictEqual(SessionManager.getChannelSockets(inboxChannelId('auth0|u1')).length, 0);
+    assert.strictEqual(SessionManager.getUserSessions('auth0|u1').length, 0);
+  });
+
+  it('también cierra las conexiones de sus identidades federadas', async () => {
+    const federated = register('google-oauth2|9', 'chan-1', 'srv-1');
+
+    await EventConsumer.handleEvent('user.suspended', {
+      user_id: 'auth0|u1',
+      identities: ['auth0|u1', 'google-oauth2|9', 42, ''],
+    });
+
+    assert.strictEqual(closedWith(federated)?.code, ACCOUNT_SUSPENDED_CLOSE_CODE);
+  });
+
+  it('ignora un evento sin identidades', async () => {
+    const socket = register('auth0|u1', 'chan-1', 'srv-1');
+
+    await EventConsumer.handleEvent('user.suspended', { identities: 'auth0|u1' });
+
+    assert.strictEqual(closedWith(socket), null);
   });
 });

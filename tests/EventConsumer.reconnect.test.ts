@@ -16,6 +16,7 @@ class FakeConnection extends EventEmitter {
   failChannel = false;
   exchange: string | null = null;
   queue: string | null = null;
+  bindings: [string, string][] = [];
 
   async createChannel() {
     if (this.failChannel) throw new Error('channel error');
@@ -27,7 +28,9 @@ class FakeConnection extends EventEmitter {
         this.queue = queue;
         return { queue };
       },
-      bindQueue: async () => undefined,
+      bindQueue: async (_queue: string, exchange: string, pattern: string) => {
+        this.bindings.push([exchange, pattern]);
+      },
       consume: async (_queue: string, handler: Handler) => {
         this.handler = handler;
       },
@@ -57,6 +60,18 @@ async function waitFor(condition: () => boolean, timeoutMs = 1000): Promise<void
 describe('EventConsumer: conexión a RabbitMQ', () => {
   afterEach(async () => {
     await EventConsumer.stop();
+  });
+
+  it('escucha member.* y role.* de Server-Roles y user.suspended de Auth-User en la misma cola', async () => {
+    const conn = new FakeConnection();
+    EventConsumer.start({ connect: async () => conn as unknown as ChannelModel, logger: silentLogger });
+    await waitFor(() => EventConsumer.isConnected);
+
+    assert.deepStrictEqual(conn.bindings, [
+      ['server.events', 'member.*'],
+      ['server.events', 'role.*'],
+      ['user.events', 'user.suspended'],
+    ]);
   });
 
   it('reintenta hasta conectar si RabbitMQ no está disponible al arrancar', async () => {
