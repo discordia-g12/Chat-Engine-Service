@@ -218,14 +218,14 @@ describe('EventConsumer: conexión a RabbitMQ', () => {
       assert.ok(info.mock.callCount() >= 2); // registró cada conexión con el logger por defecto
     } finally {
       info.mock.restore();
-      for (const [key, value] of [
-        ['RABBITMQ_URL', saved.url],
-        ['RABBITMQ_EXCHANGE', saved.exchange],
-        ['RABBITMQ_QUEUE', saved.queue],
-      ] as const) {
-        if (value === undefined) delete process.env[key];
-        else process.env[key] = value;
-      }
+      if (saved.url === undefined) delete process.env.RABBITMQ_URL;
+      else process.env.RABBITMQ_URL = saved.url;
+
+      if (saved.exchange === undefined) delete process.env.RABBITMQ_EXCHANGE;
+      else process.env.RABBITMQ_EXCHANGE = saved.exchange;
+
+      if (saved.queue === undefined) delete process.env.RABBITMQ_QUEUE;
+      else process.env.RABBITMQ_QUEUE = saved.queue;
     }
   });
 

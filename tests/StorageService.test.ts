@@ -1,10 +1,10 @@
 import { describe, it, after, mock } from 'node:test';
 import assert from 'node:assert';
-import fs from 'node:fs';
 import path from 'node:path';
 import { S3Client } from '@aws-sdk/client-s3';
 import { StorageService, MAX_ATTACHMENT_SIZE } from '../src/services/StorageService';
 import { PayloadTooLargeError, ValidationError } from '../src/errors';
+import { fileSystem as fs } from '../src/helpers/fs';
 
 describe('StorageService', () => {
   const tmpUploadDir = path.join(process.cwd(), 'tmp-test-uploads');

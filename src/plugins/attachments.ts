@@ -1,10 +1,10 @@
-import fs from 'node:fs';
 import { FastifyInstance } from 'fastify';
 import multipart from '@fastify/multipart';
 import fastifyStatic from '@fastify/static';
 import { channelAccessGuard } from '../helpers/auth';
 import { ForbiddenError, PayloadTooLargeError, ValidationError } from '../errors';
 import { StorageService, MAX_ATTACHMENT_SIZE } from '../services/StorageService';
+import { fileSystem as fs } from '../helpers/fs';
 import { ConversationService } from '../services/ConversationService';
 import { isDmChannel } from '../helpers/directMessages';
 

@@ -12,6 +12,10 @@ export interface ChannelAccessResult {
   canMentionEveryone: boolean;
   /** Roles del servidor del canal que puede mencionar (vacío sin MENTION_EVERYONE). */
   mentionableRoleIds: string[];
+  /** Tiene MANAGE_MESSAGES, ADMINISTRATOR o es dueño: puede borrar mensajes ajenos. */
+  canManageMessages: boolean;
+  /** Tiene ADD_REACTIONS: puede agregar reacciones con emojis en el canal. */
+  canAddReactions: boolean;
 }
 
 export interface VisibleChannels {
@@ -26,6 +30,8 @@ interface AccessResponseBody {
   muted_until?: string | null;
   can_mention_everyone?: boolean;
   mentionable_role_ids?: unknown;
+  can_manage_messages?: boolean;
+  can_add_reactions?: boolean;
 }
 
 /** Una lista de strings, o vacía si no vino (Core anterior a #46) o no tiene esa forma. */
@@ -76,10 +82,12 @@ export class PermissionService {
           mutedUntil: mutedUntil && !Number.isNaN(mutedUntil.getTime()) ? mutedUntil : undefined,
           canMentionEveryone: body?.can_mention_everyone === true,
           mentionableRoleIds: body?.can_mention_everyone === true ? stringList(body?.mentionable_role_ids) : [],
+          canManageMessages: body?.can_manage_messages === true,
+          canAddReactions: body?.can_add_reactions === true,
         };
       }
       case 403:
-        return { allowed: false, canSend: false, canMentionEveryone: false, mentionableRoleIds: [] };
+        return { allowed: false, canSend: false, canMentionEveryone: false, mentionableRoleIds: [], canManageMessages: false, canAddReactions: false };
       case 404:
         throw new NotFoundError('Channel not found');
       default:
