@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import type { Channel, ChannelModel, ConsumeMessage } from 'amqplib';
 import { PermissionService } from './PermissionService';
 import { SessionManager, type ClientSession } from './SessionManager';
@@ -257,6 +258,42 @@ export class EventConsumer {
   /** true mientras haya una conexión activa consumiendo eventos (se informa en /readyz). */
   static get isConnected(): boolean {
     return this.channel !== null;
+  }
+
+  /**
+   * Publica un evento en un exchange de RabbitMQ (por defecto 'server.events').
+   * Si no hay canal activo o falla la publicación, registra un warning/error y retorna false.
+   */
+  static publish(
+    routingKey: string,
+    payload: Record<string, unknown>,
+    exchange?: string
+  ): boolean {
+    if (!this.channel) {
+      (this.options?.logger ?? console).warn(
+        { routingKey },
+        'Cannot publish event: RabbitMQ channel not connected'
+      );
+      return false;
+    }
+    const targetExchange = exchange || this.options?.exchange || 'server.events';
+    try {
+      const content = Buffer.from(JSON.stringify(payload));
+      const messageId = typeof payload.event_id === 'string' ? payload.event_id : crypto.randomUUID();
+      return this.channel.publish(targetExchange, routingKey, content, {
+        persistent: true,
+        contentType: 'application/json',
+        messageId,
+        type: routingKey,
+        timestamp: Date.now(),
+        headers: {
+          server_id: String(payload.server_id ?? ''),
+        },
+      });
+    } catch (err) {
+      (this.options?.logger ?? console).error({ err, routingKey }, 'Failed to publish event');
+      return false;
+    }
   }
 
   private static async connectLoop(): Promise<void> {
