@@ -8,6 +8,13 @@ export interface IAttachment {
   contentType: string;
 }
 
+export interface IReaction {
+  emoji: string;
+  count: number;
+  users: string[];
+  emojiId?: string;
+}
+
 export interface IMessage extends Document {
   content: string;
   authorId: string;
@@ -22,6 +29,7 @@ export interface IMessage extends Document {
   editedAt?: Date | null;
   isDeleted?: boolean;
   deletedAt?: Date | null;
+  reactions?: IReaction[];
 }
 
 const AttachmentSchema = new Schema({
@@ -30,6 +38,13 @@ const AttachmentSchema = new Schema({
   url: { type: String, required: true },
   size: { type: Number, required: true },
   contentType: { type: String, required: true },
+}, { _id: false });
+
+const ReactionSchema = new Schema({
+  emoji: { type: String, required: true },
+  count: { type: Number, required: true, default: 1 },
+  users: { type: [String], default: [] },
+  emojiId: { type: String, default: undefined },
 }, { _id: false });
 
 const MessageSchema: Schema = new Schema({
@@ -89,6 +104,7 @@ const MessageSchema: Schema = new Schema({
   editedAt: { type: Date, default: null },
   isDeleted: { type: Boolean, default: false },
   deletedAt: { type: Date, default: null },
+  reactions: { type: [ReactionSchema], default: undefined },
 }, {
   strict: true,
 });

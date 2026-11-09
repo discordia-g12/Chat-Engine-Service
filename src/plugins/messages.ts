@@ -66,5 +66,33 @@ export default async function messagesPlugin(app: FastifyInstance) {
 
     return deletedPayload;
   });
+
+  app.put('/channels/:channelId/messages/:messageId/reactions', { preValidation: channelAccessGuard }, async (req) => {
+    const { channelId, messageId } = req.params as { channelId: string; messageId: string };
+    const userId = req.userId;
+    const { emoji = '' } = (req.body || {}) as { emoji?: string };
+
+    const reactionPayload = await ChatService.toggleReaction(
+      userId,
+      channelId,
+      messageId,
+      emoji,
+      req.canAddReactions ?? false
+    );
+    await PubSubService.publish(channelId, reactionPayload);
+
+    if (isDmChannel(channelId)) {
+      const convId = parseDmChannelId(channelId);
+      if (convId) {
+        const conv = await Conversation.findById(convId);
+        if (conv) {
+          const inboxEvent = { type: 'DM_MESSAGE_REACTION_UPDATED', conversationId: channelId, message: reactionPayload };
+          await Promise.all(conv.participantIds.map((id) => PubSubService.publishToInbox(id, inboxEvent)));
+        }
+      }
+    }
+
+    return reactionPayload;
+  });
 }
 

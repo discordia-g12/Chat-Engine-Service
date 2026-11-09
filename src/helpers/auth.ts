@@ -15,6 +15,8 @@ declare module 'fastify' {
     canSend?: boolean;
     /** Whether the caller has MANAGE_MESSAGES or admin rights to delete messages of others. */
     canManageMessages?: boolean;
+    /** Whether the caller has ADD_REACTIONS or is in a DM to add reactions to messages. */
+    canAddReactions?: boolean;
     /** When the caller's mute expires, if the mute is the only thing preventing them from writing. */
     mutedUntil?: Date;
     /** Full channel access result resolved during access validation. */
@@ -81,6 +83,7 @@ export async function channelAccessGuard(req: FastifyRequest): Promise<void> {
     req.serverId = '';
     req.canSend = true;
     req.canManageMessages = false;
+    req.canAddReactions = true;
     return;
   }
 
@@ -91,6 +94,7 @@ export async function channelAccessGuard(req: FastifyRequest): Promise<void> {
   req.canSend = access.canSend;
   req.mutedUntil = access.mutedUntil;
   req.canManageMessages = access.canManageMessages;
+  req.canAddReactions = access.canAddReactions;
   req.channelAccess = access;
 }
 

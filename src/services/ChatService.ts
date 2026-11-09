@@ -20,6 +20,13 @@ export interface MessageAttachmentPayload {
   contentType: string;
 }
 
+export interface MessageReactionPayload {
+  emoji: string;
+  count: number;
+  users: string[];
+  emojiId?: string;
+}
+
 export interface MessagePayload {
   id: string;
   content: string;
@@ -28,6 +35,7 @@ export interface MessagePayload {
   createdAt: Date;
   mentions: MessageMentions;
   attachments?: MessageAttachmentPayload[];
+  reactions?: MessageReactionPayload[];
   edited?: boolean;
   editedAt?: Date | null;
   isDeleted?: boolean;
@@ -62,6 +70,14 @@ function toPayload(msg: IMessage): MessagePayload {
           })),
         }
       : {}),
+    reactions: msg.reactions && msg.reactions.length > 0 && !isDeleted
+      ? msg.reactions.map((r) => ({
+          emoji: r.emoji,
+          count: r.count ?? r.users.length,
+          users: r.users ?? [],
+          ...(r.emojiId ? { emojiId: r.emojiId } : {}),
+        }))
+      : [],
     ...(isDeleted ? { type: 'deleted', isDeleted: true, deletedAt: msg.deletedAt ?? null } : {}),
   };
 }
@@ -332,6 +348,91 @@ export class ChatService {
     return {
       ...payload,
       type: 'MESSAGE_DELETED',
+    };
+  }
+
+  /**
+   * Alterna (agrega o retira) la reacción de un usuario a un mensaje con un emoji (CA 1, CA 2, CA 3).
+   *
+   * @param userId Usuario que reacciona
+   * @param channelId Canal donde reside el mensaje
+   * @param messageId ID del mensaje al que se reacciona
+   * @param emoji Emoji con el cual se reacciona
+   * @param canAddReactions Si el usuario tiene permiso ADD_REACTIONS en el canal
+   */
+  static async toggleReaction(
+    userId: string,
+    channelId: string,
+    messageId: string,
+    emoji: string,
+    canAddReactions = true
+  ): Promise<MessagePayload> {
+    const cleanEmoji = typeof emoji === 'string' ? emoji.trim() : '';
+    if (!cleanEmoji) {
+      throw new ValidationError('Emoji is required');
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(messageId)) {
+      throw new NotFoundError('Message not found');
+    }
+
+    const message = await Message.findOne({ _id: messageId, channelId });
+    if (!message) {
+      throw new NotFoundError('Message not found');
+    }
+
+    if (message.isDeleted) {
+      throw new ValidationError('Cannot react to a deleted message');
+    }
+
+    const reactions = message.reactions ? [...message.reactions] : [];
+    const existing = reactions.find((r) => r.emoji === cleanEmoji);
+
+    if (existing) {
+      const userIndex = existing.users.indexOf(userId);
+
+      if (userIndex !== -1) {
+        const nextUsers = existing.users.filter((id) => id !== userId);
+        if (nextUsers.length === 0) {
+          message.reactions = reactions.filter((r) => r.emoji !== cleanEmoji);
+        } else {
+          message.reactions = reactions.map((r) =>
+            r.emoji === cleanEmoji
+              ? { emoji: r.emoji, count: nextUsers.length, users: nextUsers, emojiId: r.emojiId }
+              : r
+          );
+        }
+      } else {
+        if (!canAddReactions) {
+          throw new ForbiddenError('User does not have permission to add reactions in this channel');
+        }
+        const nextUsers = [...existing.users, userId];
+        message.reactions = reactions.map((r) =>
+          r.emoji === cleanEmoji
+            ? { emoji: r.emoji, count: nextUsers.length, users: nextUsers, emojiId: r.emojiId }
+            : r
+        );
+      }
+    } else {
+      if (!canAddReactions) {
+        throw new ForbiddenError('User does not have permission to add reactions in this channel');
+      }
+      message.reactions = [
+        ...reactions,
+        {
+          emoji: cleanEmoji,
+          count: 1,
+          users: [userId],
+        },
+      ];
+    }
+    message.markModified('reactions');
+    await message.save();
+
+    const payload = toPayload(message);
+    return {
+      ...payload,
+      type: 'MESSAGE_REACTION_UPDATED',
     };
   }
 }

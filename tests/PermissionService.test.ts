@@ -38,7 +38,17 @@ describe('PermissionService', () => {
       canMentionEveryone: false,
       mentionableRoleIds: [],
       canManageMessages: false,
+      canAddReactions: false,
     });
+  });
+
+  it('returns whether the user can add reactions (200, can_add_reactions true)', async () => {
+    mock.method(globalThis, 'fetch', async () =>
+      ok({ server_id: 'srv-1', can_send: true, can_add_reactions: true })
+    );
+
+    const result = await PermissionService.getChannelAccess('reactor', 'channel-1');
+    assert.strictEqual(result.canAddReactions, true);
   });
 
   it('returns whether the user can manage messages (200, can_manage_messages true)', async () => {
@@ -102,7 +112,7 @@ describe('PermissionService', () => {
     mock.method(globalThis, 'fetch', async () => ({ status: 403 }) as Response);
 
     const result = await PermissionService.getChannelAccess('banned-user', 'channel-1');
-    assert.deepStrictEqual(result, { allowed: false, canSend: false, canMentionEveryone: false, mentionableRoleIds: [], canManageMessages: false });
+    assert.deepStrictEqual(result, { allowed: false, canSend: false, canMentionEveryone: false, mentionableRoleIds: [], canManageMessages: false, canAddReactions: false });
   });
 
   it('throws if the channel does not exist (404)', async () => {
