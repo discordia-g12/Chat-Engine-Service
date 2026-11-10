@@ -2,7 +2,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { Channel, ChannelModel, ConsumeMessage } from 'amqplib';
 import { ChatService } from './ChatService';
+import { NotFoundError } from '../errors';
 import { PermissionService } from './PermissionService';
+import { PubSubService } from './PubSubService';
 import { SessionManager, type ClientSession } from './SessionManager';
 import { StorageService } from './StorageService';
 
@@ -166,6 +168,24 @@ export class EventConsumer {
     );
   }
 
+  /**
+   * Manda `{ type: 'SERVER_UPDATED', serverId }` al inbox de cada miembro. Si el servidor ya no existe no
+   * hay a quién avisar; si Server-Roles no responde se descarta (no se reencola): los clientes ven el
+   * cambio la próxima vez que pidan sus servidores.
+   */
+  static async notifyServerUpdated(serverId: string): Promise<void> {
+    let userIds: string[];
+    try {
+      userIds = await PermissionService.getServerMemberIds(serverId);
+    } catch (err) {
+      if (err instanceof NotFoundError) return;
+      (this.options?.logger ?? console).warn({ err, serverId }, 'Could not notify server.updated to its members');
+      return;
+    }
+    const event = { type: 'SERVER_UPDATED', serverId };
+    await Promise.all(userIds.map((userId) => PubSubService.publishToInbox(userId, event)));
+  }
+
   static async handleEvent(routingKey: string, payload: EventPayload): Promise<void> {
     if (!payload) {
       return;
@@ -200,6 +220,14 @@ export class EventConsumer {
           } catch {}
         }
       }
+      return;
+    }
+
+    // Cambió la configuración del servidor (nombre, descripción, ícono o banner): se avisa por el inbox a
+    // todos los miembros conectados, estén o no en ese servidor (la barra de servidores muestra todos).
+    // El evento lleva solo el id: cada cliente vuelve a pedir sus servidores (ADR-0013)
+    if (routingKey === 'server.updated') {
+      if (serverId) await this.notifyServerUpdated(serverId);
       return;
     }
 
@@ -349,6 +377,8 @@ export class EventConsumer {
       // Eliminación de servidor o canal: cerrar conexiones y borrar mensajes
       await channel.bindQueue(q.queue, opts.exchange, 'server.deleted');
       await channel.bindQueue(q.queue, opts.exchange, 'channel.deleted');
+      // Cambio de nombre, descripción, ícono o banner: avisar a los miembros por el inbox
+      await channel.bindQueue(q.queue, opts.exchange, 'server.updated');
       // Cuenta suspendida por la plataforma: cerrar todas sus conexiones
       await channel.bindQueue(q.queue, opts.userExchange, 'user.suspended');
 
