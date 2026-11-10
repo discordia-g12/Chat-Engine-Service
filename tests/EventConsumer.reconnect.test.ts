@@ -62,7 +62,7 @@ describe('EventConsumer: conexión a RabbitMQ', () => {
     await EventConsumer.stop();
   });
 
-  it('escucha member.* y role.* de Server-Roles y user.suspended de Auth-User en la misma cola', async () => {
+  it('escucha member.*, role.*, server.deleted y channel.deleted de Server-Roles y user.suspended de Auth-User en la misma cola', async () => {
     const conn = new FakeConnection();
     EventConsumer.start({ connect: async () => conn as unknown as ChannelModel, logger: silentLogger });
     await waitFor(() => EventConsumer.isConnected);
@@ -70,6 +70,8 @@ describe('EventConsumer: conexión a RabbitMQ', () => {
     assert.deepStrictEqual(conn.bindings, [
       ['server.events', 'member.*'],
       ['server.events', 'role.*'],
+      ['server.events', 'server.deleted'],
+      ['server.events', 'channel.deleted'],
       ['user.events', 'user.suspended'],
     ]);
   });

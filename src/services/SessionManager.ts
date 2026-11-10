@@ -170,6 +170,32 @@ export class SessionManager {
     }
   }
 
+  /**
+   * Cierra todas las sesiones abiertas en canales de ese servidor (servidor eliminado).
+   */
+  static disconnectServer(serverId: string, reason = 'Server deleted', code = 4004): void {
+    const sessions = this.getServerSessions(serverId);
+    for (const session of sessions) {
+      if (session.socket.readyState === 1) {
+        session.socket.close(code, reason);
+      }
+      this.unregister(session.socket);
+    }
+  }
+
+  /**
+   * Cierra todas las sesiones abiertas en ese canal (canal eliminado).
+   */
+  static disconnectChannel(channelId: string, reason = 'Channel deleted', code = 4004): void {
+    const sockets = this.getChannelSockets(channelId);
+    for (const socket of sockets) {
+      if (socket.readyState === 1) {
+        socket.close(code, reason);
+      }
+      this.unregister(socket);
+    }
+  }
+
   static clear(): void {
     this.channelSockets.clear();
     this.userSessions.clear();
