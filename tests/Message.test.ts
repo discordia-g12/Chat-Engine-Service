@@ -156,4 +156,20 @@ describe('Message Model Validations', () => {
       await msg.validate();
     });
   });
+
+  it('should support edited and editedAt fields', async () => {
+    const now = new Date();
+    const msg = new Message({
+      content: 'Edited content',
+      authorId: 'user-123',
+      channelId: 'channel-456',
+      edited: true,
+      editedAt: now
+    });
+    await assert.doesNotReject(async () => {
+      await msg.validate();
+    });
+    assert.strictEqual(msg.edited, true);
+    assert.strictEqual(msg.editedAt, now);
+  });
 });
