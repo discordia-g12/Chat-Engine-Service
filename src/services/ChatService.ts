@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import mongoose from 'mongoose';
 import { Message, IMessage } from '../models/Message';
+import { ReadState } from '../models/ReadState';
 import { ChannelAccessResult, PermissionService } from './PermissionService';
 import { ForbiddenError, NotFoundError, ValidationError } from '../errors';
 import { parseMentions } from '../helpers/mentions';
@@ -209,6 +210,25 @@ export class ChatService {
     await messageDocument.save();
 
     return toPayload(messageDocument.toObject<IMessage>());
+  }
+
+  /**
+   * Elimina todos los mensajes y estados de lectura de un canal de forma permanente.
+   */
+  static async deleteChannelMessages(channelId: string): Promise<number> {
+    const res = await Message.deleteMany({ channelId });
+    await ReadState.deleteMany({ channelId });
+    return res.deletedCount;
+  }
+
+  /**
+   * Elimina todos los mensajes y estados de lectura de una lista de canales (ej. al borrar un servidor).
+   */
+  static async deleteChannelsMessages(channelIds: string[]): Promise<number> {
+    if (!channelIds.length) return 0;
+    const res = await Message.deleteMany({ channelId: { $in: channelIds } });
+    await ReadState.deleteMany({ channelId: { $in: channelIds } });
+    return res.deletedCount;
   }
 
   /**
