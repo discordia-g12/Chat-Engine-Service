@@ -199,4 +199,44 @@ describe('PermissionService', () => {
       await assert.rejects(PermissionService.getVisibleChannels(''), /User ID is required/);
     });
   });
+
+  describe('getServerMemberIds', () => {
+    it('calls /member-ids and returns the user ids', async () => {
+      let calledUrl = '';
+      mock.method(globalThis, 'fetch', async (url: string | URL | Request) => {
+        calledUrl = url.toString();
+        return ok({ server_id: 'srv 1', user_ids: ['u1', 'u2'] });
+      });
+
+      assert.deepStrictEqual(await PermissionService.getServerMemberIds('srv 1'), ['u1', 'u2']);
+      assert.match(calledUrl, /\/internal\/servers\/srv%201\/member-ids$/);
+    });
+
+    it('throws NotFoundError if the server does not exist (404)', async () => {
+      mock.method(globalThis, 'fetch', async () => ({ status: 404 }) as Response);
+      await assert.rejects(PermissionService.getServerMemberIds('srv-1'), { name: 'NotFoundError' });
+    });
+
+    it('fails as unavailable when Core cannot be reached', async () => {
+      mock.method(globalThis, 'fetch', async () => {
+        throw new Error('fetch failed');
+      });
+      await assert.rejects(PermissionService.getServerMemberIds('srv-1'), { name: 'UpstreamUnavailableError' });
+    });
+
+    it('fails as unavailable on an unexpected status or body', async () => {
+      mock.method(globalThis, 'fetch', async () => ({ status: 500 }) as Response);
+      await assert.rejects(PermissionService.getServerMemberIds('srv-1'), { name: 'UpstreamUnavailableError' });
+
+      mock.method(globalThis, 'fetch', async () => ok({ user_ids: [1] }));
+      await assert.rejects(PermissionService.getServerMemberIds('srv-1'), { name: 'UpstreamUnavailableError' });
+
+      mock.method(globalThis, 'fetch', async () => ({ status: 200, json: async () => { throw new Error('no body'); } }) as unknown as Response);
+      await assert.rejects(PermissionService.getServerMemberIds('srv-1'), { name: 'UpstreamUnavailableError' });
+    });
+
+    it('requires a server id', async () => {
+      await assert.rejects(PermissionService.getServerMemberIds(''), /Server ID is required/);
+    });
+  });
 });

@@ -136,4 +136,47 @@ export class PermissionService {
     }
     return { channelIds, roleIds: stringList(body?.role_ids) };
   }
+
+  /**
+   * Ids de todos los miembros del servidor (`GET /internal/servers/{id}/member-ids`), para avisarles por el
+   * inbox un cambio de configuración (server.updated).
+   *
+   * @throws NotFoundError si el servidor ya no existe (p. ej. se borró antes de procesar el evento)
+   * @throws UpstreamUnavailableError si Server-Roles no responde o responde algo inesperado
+   */
+  static async getServerMemberIds(serverId: string): Promise<string[]> {
+    if (!serverId) {
+      throw new Error('Server ID is required to list its members');
+    }
+
+    const coreUrl = process.env.CORE_SERVICE_URL || 'http://localhost:8000';
+    const url = `${coreUrl}/internal/servers/${encodeURIComponent(serverId)}/member-ids`;
+
+    let response: Response;
+    try {
+      response = await fetch(url);
+    } catch (cause) {
+      throw new UpstreamUnavailableError('Failed to communicate with permission service', { cause });
+    }
+
+    if (response.status === 404) {
+      throw new NotFoundError('Server not found');
+    }
+
+    let body: { user_ids?: unknown } | null = null;
+    if (response.status === 200) {
+      try {
+        body = (await response.json()) as { user_ids?: unknown } | null;
+      } catch {
+        body = null;
+      }
+    }
+    const userIds = body?.user_ids;
+    if (!Array.isArray(userIds) || !userIds.every((id) => typeof id === 'string')) {
+      throw new UpstreamUnavailableError('Failed to communicate with permission service', {
+        cause: new Error(`Core service returned an unexpected member-ids response (status ${response.status})`),
+      });
+    }
+    return userIds;
+  }
 }
