@@ -1,6 +1,7 @@
 import { describe, it, beforeEach, afterEach, mock } from 'node:test';
 import assert from 'node:assert';
 import { ACCOUNT_SUSPENDED_CLOSE_CODE, EventConsumer, type EventPayload } from '../src/services/EventConsumer';
+import { ChatService } from '../src/services/ChatService';
 import { PermissionService } from '../src/services/PermissionService';
 import { SessionManager } from '../src/services/SessionManager';
 import { inboxChannelId, toDmChannelId } from '../src/helpers/directMessages';
@@ -396,3 +397,72 @@ describe('EventConsumer: cuenta suspendida (user.suspended de Auth-User)', () =>
     assert.strictEqual(closedWith(socket), null);
   });
 });
+
+describe('EventConsumer: eliminación de servidor y canal (server.deleted, channel.deleted)', () => {
+  beforeEach(() => {
+    SessionManager.clear();
+    mock.restoreAll();
+  });
+
+  afterEach(() => {
+    mock.restoreAll();
+  });
+
+  const closedWith = (socket: WebSocket) =>
+    (socket as unknown as { _closedWith: () => { code: number; reason: string } | null })._closedWith();
+
+  const register = (userId: string, channelId: string, serverId: string) => {
+    const socket = createMockSocket();
+    SessionManager.register({ userId, channelId, serverId, socket, canSend: true, connectedAt: new Date() });
+    return socket;
+  };
+
+  it('server.deleted desconecta todas las sesiones del servidor con 4004 y borra mensajes de sus canales', async () => {
+    const srv1Socket1 = register('u1', 'chan-1', 'srv-1');
+    const srv1Socket2 = register('u2', 'chan-2', 'srv-1');
+    const otherSrvSocket = register('u1', 'chan-9', 'srv-2');
+    const dmSocket = register('u1', toDmChannelId(new Types.ObjectId()), '');
+
+    let deletedChannels: string[] = [];
+    mock.method(ChatService, 'deleteChannelsMessages', async (ids: string[]) => {
+      deletedChannels = ids;
+      return ids.length;
+    });
+
+    await EventConsumer.handleEvent('server.deleted', {
+      server_id: 'srv-1',
+      channel_ids: ['chan-1', 'chan-2'],
+    });
+
+    assert.deepStrictEqual(closedWith(srv1Socket1), { code: 4004, reason: 'Server deleted' });
+    assert.deepStrictEqual(closedWith(srv1Socket2), { code: 4004, reason: 'Server deleted' });
+    assert.strictEqual(closedWith(otherSrvSocket), null);
+    assert.strictEqual(closedWith(dmSocket), null);
+    assert.deepStrictEqual(deletedChannels, ['chan-1', 'chan-2']);
+    assert.strictEqual(SessionManager.getServerSessions('srv-1').length, 0);
+  });
+
+  it('channel.deleted desconecta todas las sesiones de ese canal con 4004 y borra sus mensajes', async () => {
+    const chan1Socket1 = register('u1', 'chan-1', 'srv-1');
+    const chan1Socket2 = register('u2', 'chan-1', 'srv-1');
+    const chan2Socket = register('u3', 'chan-2', 'srv-1');
+
+    let deletedChannel = '';
+    mock.method(ChatService, 'deleteChannelMessages', async (id: string) => {
+      deletedChannel = id;
+      return 1;
+    });
+
+    await EventConsumer.handleEvent('channel.deleted', {
+      server_id: 'srv-1',
+      channel_id: 'chan-1',
+    });
+
+    assert.deepStrictEqual(closedWith(chan1Socket1), { code: 4004, reason: 'Channel deleted' });
+    assert.deepStrictEqual(closedWith(chan1Socket2), { code: 4004, reason: 'Channel deleted' });
+    assert.strictEqual(closedWith(chan2Socket), null);
+    assert.strictEqual(deletedChannel, 'chan-1');
+    assert.strictEqual(SessionManager.getChannelSockets('chan-1').length, 0);
+  });
+});
+

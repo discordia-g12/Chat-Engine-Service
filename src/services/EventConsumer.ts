@@ -1,9 +1,15 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import type { Channel, ChannelModel, ConsumeMessage } from 'amqplib';
+import { ChatService } from './ChatService';
 import { PermissionService } from './PermissionService';
 import { SessionManager, type ClientSession } from './SessionManager';
+import { StorageService } from './StorageService';
 
 export interface EventPayload {
   server_id?: string;
+  channel_id?: string;
+  channel_ids?: string[];
   user_id?: string;
   role_id?: string;
   permissions_bitmask?: number;
@@ -177,6 +183,40 @@ export class EventConsumer {
       return;
     }
 
+    // Servidor eliminado: cerrar conexiones del servidor y borrar sus mensajes de forma permanente
+    if (routingKey === 'server.deleted') {
+      if (serverId) {
+        SessionManager.disconnectServer(serverId, 'Server deleted', 4004);
+      }
+      const channelIds = Array.isArray(payload.channel_ids)
+        ? (payload.channel_ids as unknown[]).filter((id): id is string => typeof id === 'string' && Boolean(id))
+        : [];
+      if (channelIds.length > 0) {
+        await ChatService.deleteChannelsMessages(channelIds);
+        for (const channelId of channelIds) {
+          const channelDir = path.join(StorageService.getUploadDir(), 'attachments', channelId);
+          try {
+            await fs.promises.rm(channelDir, { recursive: true, force: true });
+          } catch {}
+        }
+      }
+      return;
+    }
+
+    // Canal eliminado: cerrar conexiones del canal y borrar sus mensajes de forma permanente
+    if (routingKey === 'channel.deleted') {
+      const channelId = typeof payload.channel_id === 'string' ? payload.channel_id : undefined;
+      if (channelId) {
+        SessionManager.disconnectChannel(channelId, 'Channel deleted', 4004);
+        await ChatService.deleteChannelMessages(channelId);
+        const channelDir = path.join(StorageService.getUploadDir(), 'attachments', channelId);
+        try {
+          await fs.promises.rm(channelDir, { recursive: true, force: true });
+        } catch {}
+      }
+      return;
+    }
+
     // Cambió lo que puede hacer un rol (o se borró): afecta a todos los que lo tengan en el servidor
     if (routingKey === 'role.permissions_updated' || routingKey === 'role.deleted') {
       if (serverId) await this.recheckSendPermission(SessionManager.getServerSessions(serverId));
@@ -306,6 +346,9 @@ export class EventConsumer {
       await channel.bindQueue(q.queue, opts.exchange, 'member.*');
       // Cambios de permisos de un rol: hay que volver a evaluar quién puede escribir
       await channel.bindQueue(q.queue, opts.exchange, 'role.*');
+      // Eliminación de servidor o canal: cerrar conexiones y borrar mensajes
+      await channel.bindQueue(q.queue, opts.exchange, 'server.deleted');
+      await channel.bindQueue(q.queue, opts.exchange, 'channel.deleted');
       // Cuenta suspendida por la plataforma: cerrar todas sus conexiones
       await channel.bindQueue(q.queue, opts.userExchange, 'user.suspended');
 
