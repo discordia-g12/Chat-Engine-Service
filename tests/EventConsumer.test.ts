@@ -1,6 +1,11 @@
 import { describe, it, beforeEach, afterEach, mock } from 'node:test';
 import assert from 'node:assert';
-import { ACCOUNT_SUSPENDED_CLOSE_CODE, EventConsumer, type EventPayload } from '../src/services/EventConsumer';
+import {
+  ACCOUNT_SUSPENDED_CLOSE_CODE,
+  EventConsumer,
+  SERVER_SUSPENDED_CLOSE_CODE,
+  type EventPayload,
+} from '../src/services/EventConsumer';
 import { NotFoundError, UpstreamUnavailableError } from '../src/errors';
 import { ChatService } from '../src/services/ChatService';
 import { PermissionService } from '../src/services/PermissionService';
@@ -395,6 +400,47 @@ describe('EventConsumer: cuenta suspendida (user.suspended de Auth-User)', () =>
     const socket = register('auth0|u1', 'chan-1', 'srv-1');
 
     await EventConsumer.handleEvent('user.suspended', { identities: 'auth0|u1' });
+
+    assert.strictEqual(closedWith(socket), null);
+  });
+});
+
+describe('EventConsumer: servidor suspendido (server.suspended de Server-Roles)', () => {
+  beforeEach(() => SessionManager.clear());
+
+  const closedWith = (socket: WebSocket) =>
+    (socket as unknown as { _closedWith: () => { code: number; reason: string } | null })._closedWith();
+
+  const register = (userId: string, channelId: string, serverId: string) => {
+    const socket = createMockSocket();
+    SessionManager.register({ userId, channelId, serverId, socket, canSend: true, connectedAt: new Date() });
+    return socket;
+  };
+
+  it('cierra con 4011 las sesiones de todos los miembros en los canales de ese servidor', async () => {
+    const ana = register('ana', 'chan-1', 'srv-1');
+    const beto = register('beto', 'chan-2', 'srv-1');
+    const anaOtherServer = register('ana', 'chan-9', 'srv-2');
+    const anaDm = register('ana', toDmChannelId(new Types.ObjectId()), '');
+    const anaInbox = register('ana', inboxChannelId('ana'), '');
+
+    await EventConsumer.handleEvent('server.suspended', { server_id: 'srv-1', voice_channel_ids: [] });
+
+    for (const socket of [ana, beto]) {
+      assert.deepStrictEqual(closedWith(socket), { code: SERVER_SUSPENDED_CLOSE_CODE, reason: 'Server suspended' });
+    }
+    // Lo que no es de ese servidor sigue abierto
+    for (const socket of [anaOtherServer, anaDm, anaInbox]) {
+      assert.strictEqual(closedWith(socket), null);
+    }
+    assert.strictEqual(SessionManager.getServerSessions('srv-1').length, 0);
+    assert.strictEqual(SessionManager.getServerSessions('srv-2').length, 1);
+  });
+
+  it('ignora el evento sin server_id', async () => {
+    const socket = register('ana', 'chan-1', 'srv-1');
+
+    await EventConsumer.handleEvent('server.suspended', {});
 
     assert.strictEqual(closedWith(socket), null);
   });

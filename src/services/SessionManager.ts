@@ -163,23 +163,24 @@ export class SessionManager {
    */
   static disconnectAllSessions(userId: string, reason: string, code: number): void {
     for (const session of Array.from(this.userSessions.get(userId) ?? [])) {
-      if (session.socket.readyState === 1) {
-        session.socket.close(code, reason);
-      }
-      this.unregister(session.socket);
+      this.closeSession(session, reason, code);
     }
   }
 
+  /** Cierra una sesión (si sigue abierta) y la saca del registro. */
+  static closeSession(session: ClientSession, reason: string, code: number): void {
+    if (session.socket.readyState === 1) {
+      session.socket.close(code, reason);
+    }
+    this.unregister(session.socket);
+  }
+
   /**
-   * Cierra todas las sesiones abiertas en canales de ese servidor (servidor eliminado).
+   * Cierra todas las sesiones abiertas en canales de ese servidor (servidor eliminado o suspendido por el staff).
    */
   static disconnectServer(serverId: string, reason = 'Server deleted', code = 4004): void {
-    const sessions = this.getServerSessions(serverId);
-    for (const session of sessions) {
-      if (session.socket.readyState === 1) {
-        session.socket.close(code, reason);
-      }
-      this.unregister(session.socket);
+    for (const session of this.getServerSessions(serverId)) {
+      this.closeSession(session, reason, code);
     }
   }
 

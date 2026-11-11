@@ -73,6 +73,7 @@ describe('EventConsumer: conexión a RabbitMQ', () => {
       ['server.events', 'server.deleted'],
       ['server.events', 'channel.deleted'],
       ['server.events', 'server.updated'],
+      ['server.events', 'server.suspended'],
       ['user.events', 'user.suspended'],
     ]);
   });
