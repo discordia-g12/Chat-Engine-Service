@@ -1,9 +1,18 @@
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 import type { Channel, ChannelModel, ConsumeMessage } from 'amqplib';
+import { ChatService } from './ChatService';
+import { NotFoundError } from '../errors';
 import { PermissionService } from './PermissionService';
+import { PubSubService } from './PubSubService';
 import { SessionManager, type ClientSession } from './SessionManager';
+import { StorageService } from './StorageService';
 
 export interface EventPayload {
   server_id?: string;
+  channel_id?: string;
+  channel_ids?: string[];
   user_id?: string;
   role_id?: string;
   permissions_bitmask?: number;
@@ -166,6 +175,24 @@ export class EventConsumer {
     );
   }
 
+  /**
+   * Manda `{ type: 'SERVER_UPDATED', serverId }` al inbox de cada miembro. Si el servidor ya no existe no
+   * hay a quién avisar; si Server-Roles no responde se descarta (no se reencola): los clientes ven el
+   * cambio la próxima vez que pidan sus servidores.
+   */
+  static async notifyServerUpdated(serverId: string): Promise<void> {
+    let userIds: string[];
+    try {
+      userIds = await PermissionService.getServerMemberIds(serverId);
+    } catch (err) {
+      if (err instanceof NotFoundError) return;
+      (this.options?.logger ?? console).warn({ err, serverId }, 'Could not notify server.updated to its members');
+      return;
+    }
+    const event = { type: 'SERVER_UPDATED', serverId };
+    await Promise.all(userIds.map((userId) => PubSubService.publishToInbox(userId, event)));
+  }
+
   static async handleEvent(routingKey: string, payload: EventPayload): Promise<void> {
     if (!payload) {
       return;
@@ -184,11 +211,51 @@ export class EventConsumer {
     }
 
     // Servidor suspendido por el staff (CA 1 de "Suspender servidor completo"): se cierran todas las sesiones de
-    // sus canales, de todos los miembros. DMs y bandeja no son del servidor y siguen abiertos
+    // sus canales, de todos los miembros. DMs y bandeja no son del servidor y siguen abiertos. Los mensajes no se
+    // tocan: vuelven cuando se levanta la suspensión
     if (routingKey === 'server.suspended') {
-      if (!serverId) return;
-      for (const session of SessionManager.getServerSessions(serverId)) {
-        SessionManager.closeSession(session, 'Server suspended', SERVER_SUSPENDED_CLOSE_CODE);
+      if (serverId) SessionManager.disconnectServer(serverId, 'Server suspended', SERVER_SUSPENDED_CLOSE_CODE);
+      return;
+    }
+
+    // Servidor eliminado: cerrar conexiones del servidor y borrar sus mensajes de forma permanente
+    if (routingKey === 'server.deleted') {
+      if (serverId) {
+        SessionManager.disconnectServer(serverId, 'Server deleted', 4004);
+      }
+      const channelIds = Array.isArray(payload.channel_ids)
+        ? (payload.channel_ids as unknown[]).filter((id): id is string => typeof id === 'string' && Boolean(id))
+        : [];
+      if (channelIds.length > 0) {
+        await ChatService.deleteChannelsMessages(channelIds);
+        for (const channelId of channelIds) {
+          const channelDir = path.join(StorageService.getUploadDir(), 'attachments', channelId);
+          try {
+            await fs.promises.rm(channelDir, { recursive: true, force: true });
+          } catch {}
+        }
+      }
+      return;
+    }
+
+    // Cambió la configuración del servidor (nombre, descripción, ícono o banner): se avisa por el inbox a
+    // todos los miembros conectados, estén o no en ese servidor (la barra de servidores muestra todos).
+    // El evento lleva solo el id: cada cliente vuelve a pedir sus servidores (ADR-0013)
+    if (routingKey === 'server.updated') {
+      if (serverId) await this.notifyServerUpdated(serverId);
+      return;
+    }
+
+    // Canal eliminado: cerrar conexiones del canal y borrar sus mensajes de forma permanente
+    if (routingKey === 'channel.deleted') {
+      const channelId = typeof payload.channel_id === 'string' ? payload.channel_id : undefined;
+      if (channelId) {
+        SessionManager.disconnectChannel(channelId, 'Channel deleted', 4004);
+        await ChatService.deleteChannelMessages(channelId);
+        const channelDir = path.join(StorageService.getUploadDir(), 'attachments', channelId);
+        try {
+          await fs.promises.rm(channelDir, { recursive: true, force: true });
+        } catch {}
       }
       return;
     }
@@ -275,6 +342,42 @@ export class EventConsumer {
     return this.channel !== null;
   }
 
+  /**
+   * Publica un evento en un exchange de RabbitMQ (por defecto 'server.events').
+   * Si no hay canal activo o falla la publicación, registra un warning/error y retorna false.
+   */
+  static publish(
+    routingKey: string,
+    payload: Record<string, unknown>,
+    exchange?: string
+  ): boolean {
+    if (!this.channel) {
+      (this.options?.logger ?? console).warn(
+        { routingKey },
+        'Cannot publish event: RabbitMQ channel not connected'
+      );
+      return false;
+    }
+    const targetExchange = exchange || this.options?.exchange || 'server.events';
+    try {
+      const content = Buffer.from(JSON.stringify(payload));
+      const messageId = typeof payload.event_id === 'string' ? payload.event_id : crypto.randomUUID();
+      return this.channel.publish(targetExchange, routingKey, content, {
+        persistent: true,
+        contentType: 'application/json',
+        messageId,
+        type: routingKey,
+        timestamp: Date.now(),
+        headers: {
+          server_id: String(payload.server_id ?? ''),
+        },
+      });
+    } catch (err) {
+      (this.options?.logger ?? console).error({ err, routingKey }, 'Failed to publish event');
+      return false;
+    }
+  }
+
   private static async connectLoop(): Promise<void> {
     const opts = this.options;
     if (!opts) return;
@@ -322,6 +425,11 @@ export class EventConsumer {
       await channel.bindQueue(q.queue, opts.exchange, 'member.*');
       // Cambios de permisos de un rol: hay que volver a evaluar quién puede escribir
       await channel.bindQueue(q.queue, opts.exchange, 'role.*');
+      // Eliminación de servidor o canal: cerrar conexiones y borrar mensajes
+      await channel.bindQueue(q.queue, opts.exchange, 'server.deleted');
+      await channel.bindQueue(q.queue, opts.exchange, 'channel.deleted');
+      // Cambio de nombre, descripción, ícono o banner: avisar a los miembros por el inbox
+      await channel.bindQueue(q.queue, opts.exchange, 'server.updated');
       // Servidor suspendido por la plataforma: cerrar las sesiones de sus canales
       await channel.bindQueue(q.queue, opts.exchange, 'server.suspended');
       // Cuenta suspendida por la plataforma: cerrar todas sus conexiones

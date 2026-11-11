@@ -15,9 +15,9 @@ const downRedis: RedisPinger = {
 const hangingRedis: RedisPinger = { ping: () => new Promise<string>(() => {}) };
 
 // Assigning `undefined` to process.env stores the string "undefined", so delete instead.
-function restoreEnv(key: string, value: string | undefined): void {
-  if (value === undefined) delete process.env[key];
-  else process.env[key] = value;
+function restoreEnv(key: 'REDIS_URL', value: string | undefined): void {
+  if (value === undefined) delete process.env.REDIS_URL;
+  else process.env.REDIS_URL = value;
 }
 
 describe('Health endpoints', () => {

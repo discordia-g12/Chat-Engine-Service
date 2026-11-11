@@ -81,7 +81,7 @@ Para levantarlo junto con el Gateway y los demás servicios, usar el compose del
 | `PORT` | `3000` | Puerto HTTP y WebSocket |
 | `MONGO_URI` | `mongodb://localhost:27017/discordia_chat` | Historial de mensajes. En producción, MongoDB Atlas |
 | `REDIS_URL` | `redis://localhost:6379` | Redis para pub/sub de mensajería multi-instancia y verificación en `/readyz` |
-| `CORE_SERVICE_URL` | `http://localhost:8000` | Server-Roles-Core, para `/internal/channels/{id}/access` y `/internal/users/{id}/visible-channels`. En local, `http://localhost:8080` |
+| `CORE_SERVICE_URL` | `http://localhost:8000` | Server-Roles-Core, para `/internal/channels/{id}/access`, `/internal/users/{id}/visible-channels` y `/internal/servers/{id}/member-ids`. En local, `http://localhost:8080` |
 | `AUTH_SERVICE_URL` | `http://localhost:8000` | Auth-User-Service, para `/internal/users/{id}/canonical` y `/internal/relations`. Timeout de 2 s; si no responde, los DMs dan `503` |
 | `RABBITMQ_URL` | `amqp://admin:admin@rabbitmq:5672/` | Broker de los eventos de Server-Roles |
 | `RABBITMQ_EXCHANGE` | `server.events` | Exchange del que consume |
@@ -153,7 +153,11 @@ Solo recibe, por el canal de Redis `inbox:<userId>`:
 ```json
 { "type": "DM_MESSAGE", "conversationId": "dm-…", "message": {} }
 { "type": "DM_CONVERSATION", "conversation": {} }
+{ "type": "SERVER_UPDATED", "serverId": "…" }
 ```
+
+`SERVER_UPDATED` avisa que cambió el nombre, la descripción, el ícono o el banner de un servidor del usuario: el
+cliente vuelve a pedir `GET /api/v1/servers` (ADR 0013 de `org-docs`).
 
 Al reconectar, el cliente vuelve a pedir `GET /conversations`. Mientras el inbox está conectado, la clave Redis
 `presence:<userId>` tiene un TTL de 60 s y la renueva cada pong del heartbeat. Al cerrarse el último socket de esa
@@ -174,7 +178,8 @@ Cloudflare a los ~100 s).
 
 ### Eventos que consume
 
-Cola `chat_engine_events`, enlazada a `member.*`, `role.*` y `server.suspended` del exchange `server.events`, y a
+Cola `chat_engine_events`, enlazada a `member.*`, `role.*`, `server.deleted`, `server.updated`, `channel.deleted` y
+`server.suspended` del exchange `server.events`, y a
 `user.suspended` del exchange `user.events` (Auth-User):
 
 - `server.suspended`: cierra con `4011` las sesiones de los canales de ese servidor, de todos los miembros. Los DMs y
@@ -184,7 +189,9 @@ Cola `chat_engine_events`, enlazada a `member.*`, `role.*` y `server.suspended` 
 - `member.banned`, `member.kicked` y `member.left`: cierra las sesiones de ese usuario en ese servidor;
 - `member.muted` y `member.unmuted`: bloquea o habilita la escritura, y programa el fin del silencio;
 - `member.role_assigned`, `member.role_removed`, `role.permissions_updated` y `role.deleted`: vuelve a
-  preguntar a Server-Roles si puede escribir.
+  preguntar a Server-Roles si puede escribir;
+- `server.updated`: pide los miembros a Server-Roles (`/internal/servers/{id}/member-ids`) y les manda
+  `SERVER_UPDATED` por el inbox. Si Server-Roles no responde, el aviso se descarta.
 
 Si RabbitMQ no está al arrancar, el consumidor reintenta solo (de 1 a 30 s) sin bloquear el servicio.
 

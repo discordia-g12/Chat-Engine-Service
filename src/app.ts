@@ -3,6 +3,7 @@ import websocketPlugin from './plugins/websocket';
 import { DEFAULT_PING_INTERVAL_MS } from './helpers/heartbeat';
 import { EventConsumer } from './services/EventConsumer';
 import historyPlugin from './plugins/history';
+import messagesPlugin from './plugins/messages';
 import readStatesPlugin from './plugins/readStates';
 import attachmentsPlugin from './plugins/attachments';
 import conversationsPlugin from './plugins/conversations';
@@ -29,6 +30,7 @@ function buildApp(opts: BuildAppOptions = {}): FastifyInstance {
     pingIntervalMs: opts.wsPingIntervalMs ?? DEFAULT_PING_INTERVAL_MS,
   });
   app.register(historyPlugin);
+  app.register(messagesPlugin);
   app.register(readStatesPlugin);
   app.register(attachmentsPlugin);
   app.register(conversationsPlugin);
