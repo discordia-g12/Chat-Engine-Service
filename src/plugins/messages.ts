@@ -40,12 +40,17 @@ export default async function messagesPlugin(app: FastifyInstance) {
   app.delete('/channels/:channelId/messages/:messageId', { preValidation: channelAccessGuard }, async (req) => {
     const { channelId, messageId } = req.params as { channelId: string; messageId: string };
     const userId = req.userId;
+    const query = req.query as { reason?: string } | undefined;
+    const body = req.body as { reason?: string } | undefined;
+    const reason = query?.reason || body?.reason;
 
     const deletedPayload = await ChatService.deleteMessage(
       userId,
       channelId,
       messageId,
-      req.canManageMessages ?? false
+      req.canManageMessages ?? false,
+      req.serverId,
+      reason
     );
     await PubSubService.publish(channelId, deletedPayload);
 

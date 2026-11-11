@@ -9,6 +9,7 @@ import { Message } from '../src/models/Message';
 import { Conversation } from '../src/models/Conversation';
 import { PubSubService } from '../src/services/PubSubService';
 import { ChatService } from '../src/services/ChatService';
+import { EventConsumer } from '../src/services/EventConsumer';
 
 describe('Delete Message (DELETE /channels/:channelId/messages/:messageId)', () => {
   let app: FastifyInstance;
@@ -71,11 +72,18 @@ describe('Delete Message (DELETE /channels/:channelId/messages/:messageId)', () 
     await Conversation.deleteMany({});
   });
 
-  it('allows author to soft-delete own message in server channel', async () => {
+  it('allows author to soft-delete own message in server channel without publishing audit event', async () => {
     const published: { channelId: string; payload: unknown }[] = [];
     const origPublish = PubSubService.publish;
     PubSubService.publish = async (ch: string, p: unknown) => {
       published.push({ channelId: ch, payload: p });
+    };
+
+    const auditEvents: unknown[] = [];
+    const origEventPublish = EventConsumer.publish;
+    EventConsumer.publish = (rk: string, p: Record<string, unknown>) => {
+      auditEvents.push({ rk, p });
+      return true;
     };
 
     try {
@@ -108,6 +116,9 @@ describe('Delete Message (DELETE /channels/:channelId/messages/:messageId)', () 
       assert.strictEqual(pubPayload.type, 'MESSAGE_DELETED');
       assert.strictEqual(pubPayload.isDeleted, true);
 
+      // Verify no audit log event is generated when author deletes own message
+      assert.strictEqual(auditEvents.length, 0);
+
       // Verify DB persistence
       const dbMsg = await Message.findById(msg._id);
       assert.strictEqual(dbMsg?.isDeleted, true);
@@ -122,31 +133,55 @@ describe('Delete Message (DELETE /channels/:channelId/messages/:messageId)', () 
       assert.strictEqual(history[0].content, '');
     } finally {
       PubSubService.publish = origPublish;
+      EventConsumer.publish = origEventPublish;
     }
   });
 
-  it('allows moderator with can_manage_messages to delete another user message', async () => {
-    const msg = await Message.create({
-      content: 'User message violating rules',
-      authorId: 'regular-user',
-      channelId,
-    });
+  it('allows moderator with can_manage_messages to delete another user message and publishes audit event', async () => {
+    const publishedEvents: { routingKey: string; payload: Record<string, unknown> }[] = [];
+    const origPublish = EventConsumer.publish;
+    EventConsumer.publish = (routingKey: string, payload: Record<string, unknown>) => {
+      publishedEvents.push({ routingKey, payload });
+      return true;
+    };
 
-    const res = await app.inject({
-      method: 'DELETE',
-      url: `/channels/${channelId}/messages/${msg._id.toString()}`,
-      headers: {
-        'x-user-id': 'moderator-user',
-      },
-    });
+    try {
+      const msg = await Message.create({
+        content: 'User message violating rules',
+        authorId: 'regular-user',
+        channelId,
+      });
 
-    assert.strictEqual(res.statusCode, 200);
-    const data = res.json();
-    assert.strictEqual(data.id, msg._id.toString());
-    assert.strictEqual(data.isDeleted, true);
+      const res = await app.inject({
+        method: 'DELETE',
+        url: `/channels/${channelId}/messages/${msg._id.toString()}?reason=Inappropriate%20behavior`,
+        headers: {
+          'x-user-id': 'moderator-user',
+        },
+      });
 
-    const dbMsg = await Message.findById(msg._id);
-    assert.strictEqual(dbMsg?.isDeleted, true);
+      assert.strictEqual(res.statusCode, 200);
+      const data = res.json();
+      assert.strictEqual(data.id, msg._id.toString());
+      assert.strictEqual(data.isDeleted, true);
+
+      const dbMsg = await Message.findById(msg._id);
+      assert.strictEqual(dbMsg?.isDeleted, true);
+
+      // Verify audit event published
+      assert.strictEqual(publishedEvents.length, 1);
+      assert.strictEqual(publishedEvents[0].routingKey, 'message.deleted_by_moderator');
+      assert.strictEqual(publishedEvents[0].payload.server_id, 'srv-1');
+      assert.strictEqual(publishedEvents[0].payload.channel_id, channelId);
+      assert.strictEqual(publishedEvents[0].payload.message_id, msg._id.toString());
+      assert.strictEqual(publishedEvents[0].payload.author_id, 'regular-user');
+      assert.strictEqual(publishedEvents[0].payload.deleted_by, 'moderator-user');
+      assert.strictEqual(publishedEvents[0].payload.reason, 'Inappropriate behavior');
+      assert.ok(publishedEvents[0].payload.event_id);
+      assert.ok(publishedEvents[0].payload.created_at);
+    } finally {
+      EventConsumer.publish = origPublish;
+    }
   });
 
   it('rejects deletion by non-author without moderation permission with 403 Forbidden', async () => {
@@ -295,5 +330,36 @@ describe('Delete Message (DELETE /channels/:channelId/messages/:messageId)', () 
 
     assert.strictEqual(res.statusCode, 400);
     assert.strictEqual(res.json().detail, 'Cannot edit a deleted message');
+  });
+
+  it('EventConsumer.publish returns false when channel is not connected', () => {
+    const res = EventConsumer.publish('test.key', { foo: 'bar' });
+    assert.strictEqual(res, false);
+  });
+
+  it('EventConsumer.publish publishes message when channel is connected', () => {
+    const published: { exchange: string; routingKey: string; content: Buffer; options: unknown }[] = [];
+    const mockChannel = {
+      publish: (exchange: string, routingKey: string, content: Buffer, options: unknown) => {
+        published.push({ exchange, routingKey, content, options });
+        return true;
+      },
+    };
+
+    const prevChannel = (EventConsumer as unknown as { channel: unknown }).channel;
+    (EventConsumer as unknown as { channel: unknown }).channel = mockChannel;
+
+    try {
+      const ok = EventConsumer.publish('server.event.test', { server_id: 'srv-99', event_id: 'evt-1' });
+      assert.strictEqual(ok, true);
+      assert.strictEqual(published.length, 1);
+      assert.strictEqual(published[0].routingKey, 'server.event.test');
+      assert.strictEqual(published[0].exchange, 'server.events');
+      const payload = JSON.parse(published[0].content.toString());
+      assert.strictEqual(payload.server_id, 'srv-99');
+      assert.strictEqual(payload.event_id, 'evt-1');
+    } finally {
+      (EventConsumer as unknown as { channel: unknown }).channel = prevChannel;
+    }
   });
 });

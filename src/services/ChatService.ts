@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import mongoose from 'mongoose';
 import { Message, IMessage } from '../models/Message';
 import { ReadState } from '../models/ReadState';
@@ -5,6 +6,7 @@ import { ChannelAccessResult, PermissionService } from './PermissionService';
 import { ForbiddenError, NotFoundError, ValidationError } from '../errors';
 import { parseMentions } from '../helpers/mentions';
 import { isDmChannel } from '../helpers/directMessages';
+import { EventConsumer } from './EventConsumer';
 
 /** Menciones que notifican. Un @everyone o un rol sin permiso queda en el texto pero no acá. */
 export interface MessageMentions {
@@ -317,12 +319,16 @@ export class ChatService {
    * @param channelId Canal donde reside el mensaje
    * @param messageId ID del mensaje a eliminar
    * @param canManageMessages Si el usuario tiene permisos de moderación en el canal
+   * @param serverId ID opcional del servidor para registro en audit log
+   * @param reason Razón opcional de la moderación
    */
   static async deleteMessage(
     userId: string,
     channelId: string,
     messageId: string,
-    canManageMessages = false
+    canManageMessages = false,
+    serverId?: string,
+    reason?: string
   ): Promise<MessagePayload> {
     if (!mongoose.Types.ObjectId.isValid(messageId)) {
       throw new NotFoundError('Message not found');
@@ -354,6 +360,8 @@ export class ChatService {
       }
     }
 
+    const previousAuthorId = message.authorId;
+
     message.isDeleted = true;
     message.deletedAt = new Date();
     message.content = '';
@@ -363,6 +371,33 @@ export class ChatService {
     message.mentionEveryone = undefined;
 
     await message.save();
+
+    // Audit Log: Si un moderador elimina el mensaje de otro usuario en un servidor
+    if (!isDm && !isAuthor) {
+      let targetServerId = serverId;
+      if (!targetServerId) {
+        try {
+          const access = await PermissionService.getChannelAccess(userId, channelId);
+          targetServerId = access.serverId;
+        } catch {
+          // ignore lookup error
+        }
+      }
+
+      if (targetServerId) {
+        EventConsumer.publish('message.deleted_by_moderator', {
+          event_id: crypto.randomUUID(),
+          event_type: 'message.deleted_by_moderator',
+          server_id: targetServerId,
+          channel_id: channelId,
+          message_id: message._id.toString(),
+          author_id: previousAuthorId,
+          deleted_by: userId,
+          reason: reason || null,
+          created_at: new Date().toISOString(),
+        });
+      }
+    }
 
     const payload = toPayload(message);
     return {
