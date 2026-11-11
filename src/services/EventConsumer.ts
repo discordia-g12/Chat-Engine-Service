@@ -20,6 +20,12 @@ export interface EventPayload {
  */
 export const ACCOUNT_SUSPENDED_CLOSE_CODE = 4010;
 
+/**
+ * Cierre por servidor suspendido por la plataforma (server.suspended de Server-Roles, ADR-002 de Server-Roles).
+ * El cliente no reintenta: Server-Roles le niega el acceso al canal hasta que se levante la suspensión.
+ */
+export const SERVER_SUSPENDED_CLOSE_CODE = 4011;
+
 const RECONNECT_BASE_MS = 1000;
 const RECONNECT_MAX_MS = 30_000;
 const MAX_TIMEOUT_MS = 2 ** 31 - 1;
@@ -177,6 +183,16 @@ export class EventConsumer {
       return;
     }
 
+    // Servidor suspendido por el staff (CA 1 de "Suspender servidor completo"): se cierran todas las sesiones de
+    // sus canales, de todos los miembros. DMs y bandeja no son del servidor y siguen abiertos
+    if (routingKey === 'server.suspended') {
+      if (!serverId) return;
+      for (const session of SessionManager.getServerSessions(serverId)) {
+        SessionManager.closeSession(session, 'Server suspended', SERVER_SUSPENDED_CLOSE_CODE);
+      }
+      return;
+    }
+
     // Cambió lo que puede hacer un rol (o se borró): afecta a todos los que lo tengan en el servidor
     if (routingKey === 'role.permissions_updated' || routingKey === 'role.deleted') {
       if (serverId) await this.recheckSendPermission(SessionManager.getServerSessions(serverId));
@@ -306,6 +322,8 @@ export class EventConsumer {
       await channel.bindQueue(q.queue, opts.exchange, 'member.*');
       // Cambios de permisos de un rol: hay que volver a evaluar quién puede escribir
       await channel.bindQueue(q.queue, opts.exchange, 'role.*');
+      // Servidor suspendido por la plataforma: cerrar las sesiones de sus canales
+      await channel.bindQueue(q.queue, opts.exchange, 'server.suspended');
       // Cuenta suspendida por la plataforma: cerrar todas sus conexiones
       await channel.bindQueue(q.queue, opts.userExchange, 'user.suspended');
 

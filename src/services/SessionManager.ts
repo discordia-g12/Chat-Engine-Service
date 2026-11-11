@@ -163,11 +163,16 @@ export class SessionManager {
    */
   static disconnectAllSessions(userId: string, reason: string, code: number): void {
     for (const session of Array.from(this.userSessions.get(userId) ?? [])) {
-      if (session.socket.readyState === 1) {
-        session.socket.close(code, reason);
-      }
-      this.unregister(session.socket);
+      this.closeSession(session, reason, code);
     }
+  }
+
+  /** Cierra una sesión (si sigue abierta) y la saca del registro. */
+  static closeSession(session: ClientSession, reason: string, code: number): void {
+    if (session.socket.readyState === 1) {
+      session.socket.close(code, reason);
+    }
+    this.unregister(session.socket);
   }
 
   static clear(): void {

@@ -167,15 +167,18 @@ instancia se borra; si el usuario tiene otro en otra instancia, vuelve en el pr�
 | Cierre `4003` | Lo banearon del servidor (`member.banned`) |
 | Cierre `4002` | Lo expulsaron o abandonó el servidor (`member.kicked`, `member.left`) |
 | Cierre `4010` | El staff suspendió la cuenta (`user.suspended`). Se cierran todas sus conexiones; reconectar no sirve, Kong rechaza sus tokens |
+| Cierre `4011` | El staff suspendió el servidor (`server.suspended`). Se cierran las conexiones a sus canales, de todos los miembros; reconectar no sirve hasta que se levante la suspensión (Server-Roles niega el acceso con `server-suspended`) |
 
 Cada 30 s el servidor manda un ping de protocolo y cierra las conexiones que no responden (evita el corte de
 Cloudflare a los ~100 s).
 
 ### Eventos que consume
 
-Cola `chat_engine_events`, enlazada a `member.*` y `role.*` del exchange `server.events`, y a
+Cola `chat_engine_events`, enlazada a `member.*`, `role.*` y `server.suspended` del exchange `server.events`, y a
 `user.suspended` del exchange `user.events` (Auth-User):
 
+- `server.suspended`: cierra con `4011` las sesiones de los canales de ese servidor, de todos los miembros. Los DMs y
+  la bandeja no son del servidor y siguen abiertos;
 - `user.suspended`: cierra con `4010` todas las sesiones de la cuenta (canales, DMs y bandeja) de cada una
   de sus identidades (`identities`, la principal y sus alias federados);
 - `member.banned`, `member.kicked` y `member.left`: cierra las sesiones de ese usuario en ese servidor;

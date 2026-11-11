@@ -70,6 +70,7 @@ describe('EventConsumer: conexión a RabbitMQ', () => {
     assert.deepStrictEqual(conn.bindings, [
       ['server.events', 'member.*'],
       ['server.events', 'role.*'],
+      ['server.events', 'server.suspended'],
       ['user.events', 'user.suspended'],
     ]);
   });
