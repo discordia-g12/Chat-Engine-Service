@@ -121,6 +121,19 @@ En producción está detrás de Kong, bajo `/api/v1/chat` (Kong saca ese prefijo
 - `GET /readyz`: ping a Mongo y Redis (1 s cada uno). `200` si los dos responden; `503` con el detalle si
   falla alguno. RabbitMQ se informa pero no define si está listo: sin eventos el chat sigue andando.
 
+### Rutas internas
+
+Las llaman otros servicios por la red del nodo (`http://chat-engine:3000`), sin JWT y sin pasar por Kong. Como
+Kong enruta todo `/api/v1/chat` sacando el prefijo, `/api/v1/chat/internal/...` llegaría al servicio: lo que
+trae `X-User-Id` o `X-Forwarded-Prefix` (los pone Kong) recibe `404`.
+
+- `GET /internal/metrics/messages?from=&to=`: métricas de mensajes para el backoffice, que pide
+  Notification-Audit-Metrics. `from` y `to` en ISO 8601 (`2026-11-01` o `2026-11-01T00:00:00Z`), rango
+  `[from, to)` sobre `createdAt`. Responde `{ from, to, messages, activeUsers }` con las fechas en UTC.
+  `messages` cuenta los de canales y DMs, borrados incluidos (se enviaron igual); `activeUsers` es la cantidad
+  de autores distintos (usuario activo = mandó al menos un mensaje). `400` si falta una fecha, no es ISO 8601
+  o `from >= to`. Usa el índice `{ createdAt: 1, authorId: 1 }`.
+
 Los errores siguen RFC 7807 (`application/problem+json`): `400` datos inválidos, `401` sin usuario, `403`
 sin acceso al canal, `404` canal inexistente o mensaje inexistente y `503` si Server-Roles (o Auth, en un DM) no
 responde. Por el WebSocket, un error llega como `{"error": "...", "status": 403}`.
@@ -218,6 +231,7 @@ src/
 ├── plugins/websocket.ts       WebSocket del canal
 ├── plugins/history.ts         historial
 ├── plugins/conversations.ts   conversaciones directas y presencia
+├── plugins/internalMetrics.ts /internal/metrics/messages (backoffice)
 ├── plugins/errorHandler.ts    errores RFC 7807
 ├── services/ChatService.ts    guardar mensajes, historial y mensajes perdidos
 ├── services/SessionManager.ts sesiones abiertas por canal y usuario (en memoria)
@@ -226,6 +240,7 @@ src/
 ├── services/ConversationService.ts  conversaciones directas y solicitud de mensaje
 ├── services/RelationsService.ts  consulta a Auth: id canónico y relación entre usuarios
 ├── services/PresenceService.ts  presencia en Redis
+├── services/MetricsService.ts  conteo de mensajes y usuarios activos por período
 ├── services/EventConsumer.ts  eventos de RabbitMQ
 ├── helpers/                   identidad, permisos y heartbeat
 ├── models/                    modelos de Mongoose (Message, ReadState, Conversation)
