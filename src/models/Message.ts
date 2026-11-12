@@ -111,6 +111,8 @@ const MessageSchema: Schema = new Schema({
 
 MessageSchema.index({ channelId: 1, createdAt: -1 });
 MessageSchema.index({ channelId: 1, _id: 1 });
+// Métricas del backoffice (`/internal/metrics/messages`): rango de fechas y autores distintos sin collection scan.
+MessageSchema.index({ createdAt: 1, authorId: 1 });
 
 export const Message = mongoose.model<IMessage>('Message', MessageSchema);
 

@@ -7,6 +7,7 @@ import messagesPlugin from './plugins/messages';
 import readStatesPlugin from './plugins/readStates';
 import attachmentsPlugin from './plugins/attachments';
 import conversationsPlugin from './plugins/conversations';
+import internalMetricsPlugin from './plugins/internalMetrics';
 import { registerErrorHandler } from './plugins/errorHandler';
 import { getRedis } from './config/redis';
 import { checkMongo, checkRedis, RedisPinger } from './config/readiness';
@@ -34,6 +35,7 @@ function buildApp(opts: BuildAppOptions = {}): FastifyInstance {
   app.register(readStatesPlugin);
   app.register(attachmentsPlugin);
   app.register(conversationsPlugin);
+  app.register(internalMetricsPlugin);
 
   app.get('/livez', async () => {
     return { status: 'ok', timestamp: new Date().toISOString() };
