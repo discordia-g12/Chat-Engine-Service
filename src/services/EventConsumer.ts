@@ -218,7 +218,7 @@ export class EventConsumer {
       return;
     }
 
-    // Servidor eliminado: cerrar conexiones del servidor y borrar sus mensajes de forma permanente
+    // Servidor eliminado: cerrar conexiones del servidor, borrar sus mensajes de forma permanente y avisar por inbox
     if (routingKey === 'server.deleted') {
       if (serverId) {
         SessionManager.disconnectServer(serverId, 'Server deleted', 4004);
@@ -234,6 +234,19 @@ export class EventConsumer {
             await fs.promises.rm(channelDir, { recursive: true, force: true });
           } catch {}
         }
+      }
+      if (serverId && Array.isArray(payload.member_ids)) {
+        const memberIds = Array.from(
+          new Set((payload.member_ids as unknown[]).filter((id): id is string => typeof id === 'string' && Boolean(id)))
+        );
+        const event = { type: 'SERVER_DELETED', serverId };
+        await Promise.all(
+          memberIds.map((id) =>
+            PubSubService.publishToInbox(id, event).catch((err) =>
+              (this.options?.logger ?? console).warn({ err, serverId, userId: id }, 'Could not notify server.deleted to member')
+            )
+          )
+        );
       }
       return;
     }
