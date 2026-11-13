@@ -490,6 +490,25 @@ describe('EventConsumer: eliminación de servidor y canal (server.deleted, chann
     assert.strictEqual(SessionManager.getServerSessions('srv-1').length, 0);
   });
 
+  it('server.deleted avisa SERVER_DELETED por el inbox a los miembros incluidos en el evento', async () => {
+    mock.method(ChatService, 'deleteChannelsMessages', async () => 0);
+    const published: Array<{ userId: string; event: unknown }> = [];
+    mock.method(PubSubService, 'publishToInbox', async (userId: string, event: unknown) => {
+      published.push({ userId, event });
+    });
+
+    await EventConsumer.handleEvent('server.deleted', {
+      server_id: 'srv-1',
+      channel_ids: ['chan-1'],
+      member_ids: ['u1', 'u2', 'u1'],
+    });
+
+    assert.deepStrictEqual(published, [
+      { userId: 'u1', event: { type: 'SERVER_DELETED', serverId: 'srv-1' } },
+      { userId: 'u2', event: { type: 'SERVER_DELETED', serverId: 'srv-1' } },
+    ]);
+  });
+
   it('channel.deleted desconecta todas las sesiones de ese canal con 4004 y borra sus mensajes', async () => {
     const chan1Socket1 = register('u1', 'chan-1', 'srv-1');
     const chan1Socket2 = register('u2', 'chan-1', 'srv-1');
