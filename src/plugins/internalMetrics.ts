@@ -1,5 +1,6 @@
 import { FastifyInstance } from 'fastify';
-import { NotFoundError, ValidationError } from '../errors';
+import { ValidationError } from '../errors';
+import { rejectProxiedRequests } from '../helpers/internalOnly';
 import { MetricsService } from '../services/MetricsService';
 
 // Fecha (YYYY-MM-DD) o fecha y hora con zona opcional: `new Date()` sola acepta "2026" o un timestamp.
@@ -26,19 +27,9 @@ function parseIsoDate(name: string, value: unknown): Date {
   return date;
 }
 
-/**
- * Rutas `/internal/*`: las consumen otros servicios por la red del nodo, sin JWT y sin pasar por Kong.
- *
- * Kong enruta `/api/v1/chat` con `strip_path`, así que `/api/v1/chat/internal/...` llegaría acá con el token
- * de cualquier usuario. Lo que pasa por Kong trae `X-User-Id` (lo pone el validador, que borra el que mande
- * el cliente) y `X-Forwarded-Prefix`: con cualquiera de los dos se responde 404, como si no existiera.
- */
+/** Métricas para el backoffice. Solo red del nodo: ver `rejectProxiedRequests`. */
 export default async function internalMetricsPlugin(app: FastifyInstance) {
-  app.addHook('onRequest', async (req) => {
-    if (req.headers['x-user-id'] !== undefined || req.headers['x-forwarded-prefix'] !== undefined) {
-      throw new NotFoundError(`Route ${req.method} ${req.url} not found`);
-    }
-  });
+  app.addHook('onRequest', rejectProxiedRequests);
 
   app.get('/internal/metrics/messages', async (req) => {
     const { from: rawFrom, to: rawTo } = (req.query ?? {}) as Record<string, unknown>;

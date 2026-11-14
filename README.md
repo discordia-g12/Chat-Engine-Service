@@ -134,6 +134,25 @@ trae `X-User-Id` o `X-Forwarded-Prefix` (los pone Kong) recibe `404`.
   de autores distintos (usuario activo = mandó al menos un mensaje). `400` si falta una fecha, no es ISO 8601
   o `from >= to`. Usa el índice `{ createdAt: 1, authorId: 1 }`.
 
+Las que siguen las usa Voice-Signaling para las llamadas privadas 1 a 1 (historia #50). Voice está en el mismo
+nodo (realtime) y es el dueño de la llamada: Chat solo dice quién puede llamar y reparte los avisos.
+
+- `GET /internal/conversations/:id/call-access?user_id=<X-User-Id crudo>`: si el usuario puede llamar en la
+  conversación. Mismas reglas que para escribir, sin mandar nada ni cambiar el estado (una conversación que el
+  próximo mensaje aceptaría también vale). Responde `{ conversationId, userId, otherUserId }` con ids
+  canónicos. `404` con `code: CONVERSATION_NOT_FOUND` si no existe o el id no es `dm-…`; `403` si no participa; `403` con `code`
+  `DM_NOT_DELIVERABLE` (no existe, suspendido o bloqueo, sin decir cuál) o `DM_PENDING`; `400` sin `user_id`;
+  `503` si Auth no responde.
+- `GET /internal/users/:id/canonical`: `{ userId, suspended }`, con la misma cache de un minuto que usan los
+  DMs. `404` con `code: USER_NOT_FOUND` si no existe; `503` si Auth no responde.
+
+  Los 404 de estas rutas siempre traen `code`: un 404 sin código es una ruta que este Chat no tiene, y Voice lo
+  trata como Chat no disponible.
+- `POST /internal/inbox/events` con `{ userIds, event }`: publica `event` tal cual en el inbox de cada usuario
+  (`inbox:<id>`) y responde `202`. `userIds`: de 1 a 10 ids no vacíos (los repetidos reciben uno solo).
+  `event.type` tiene que empezar con `CALL_` (`400` si no): el resto de los eventos los publica Chat. `413` si
+  `event` pasa los 8 KB.
+
 Los errores siguen RFC 7807 (`application/problem+json`): `400` datos inválidos, `401` sin usuario, `403`
 sin acceso al canal, `404` canal inexistente o mensaje inexistente y `503` si Server-Roles (o Auth, en un DM) no
 responde. Por el WebSocket, un error llega como `{"error": "...", "status": 403}`.
@@ -232,6 +251,7 @@ src/
 ├── plugins/history.ts         historial
 ├── plugins/conversations.ts   conversaciones directas y presencia
 ├── plugins/internalMetrics.ts /internal/metrics/messages (backoffice)
+├── plugins/internalCalls.ts   /internal para las llamadas privadas (Voice-Signaling)
 ├── plugins/errorHandler.ts    errores RFC 7807
 ├── services/ChatService.ts    guardar mensajes, historial y mensajes perdidos
 ├── services/SessionManager.ts sesiones abiertas por canal y usuario (en memoria)

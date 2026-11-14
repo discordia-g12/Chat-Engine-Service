@@ -7,6 +7,13 @@ const INBOX_PREFIX = 'inbox:';
 export const DM_PENDING = 'DM_PENDING';
 export const DM_NOT_DELIVERABLE = 'DM_NOT_DELIVERABLE';
 
+/**
+ * Códigos de los 404 de las rutas internas de llamadas: un 404 sin código es una ruta que este Chat no tiene
+ * (Voice nuevo con Chat viejo) y Voice lo trata como Chat no disponible.
+ */
+export const CONVERSATION_NOT_FOUND = 'CONVERSATION_NOT_FOUND';
+export const USER_NOT_FOUND = 'USER_NOT_FOUND';
+
 /** Un DM usa `dm-<ObjectId>` como `channelId`: así `Message`, `ReadState` y las rutas de canal no cambian. */
 export function isDmChannel(channelId: string): boolean {
   return channelId.startsWith(DM_ID_PREFIX);

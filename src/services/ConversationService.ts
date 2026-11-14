@@ -5,7 +5,7 @@ import { PubSubService } from './PubSubService';
 import { ReadStateService } from './ReadStateService';
 import { RelationsService, UserRelations } from './RelationsService';
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from '../errors';
-import { DM_NOT_DELIVERABLE, DM_PENDING, parseDmChannelId, toDmChannelId } from '../helpers/directMessages';
+import { CONVERSATION_NOT_FOUND, DM_NOT_DELIVERABLE, DM_PENDING, parseDmChannelId, toDmChannelId } from '../helpers/directMessages';
 
 const PREVIEW_MAX_LENGTH = 200;
 const DUPLICATE_KEY = 11000;
@@ -196,6 +196,43 @@ export class ConversationService {
   /** Lo que hay que cumplir para escribir, sin mandar nada ni cambiar el estado: lo usa la subida de adjuntos. */
   static async assertCanSend(userId: string, channelId: string): Promise<void> {
     await this.checkSend(userId, channelId);
+  }
+
+  /**
+   * Si el usuario puede llamar en la conversación (lo pregunta Voice-Signaling, historia #50). Mismas reglas
+   * que para escribir, sin mandar nada ni cambiar el estado: una conversación que el próximo mensaje aceptaría
+   * (son amigos, o llama quien la rechazó) también vale. Recibe el `X-User-Id` crudo, que puede ser un alias,
+   * y devuelve los ids canónicos.
+   *
+   * @throws NotFoundError si la conversación no existe o el id no es `dm-…`
+   * @throws ForbiddenError si no participa; `DM_NOT_DELIVERABLE` si no existe, está suspendido o hay bloqueo;
+   *   `DM_PENDING` si falta aceptar
+   * @throws UpstreamUnavailableError si Auth no responde
+   */
+  static async callAccess(
+    rawUserId: string,
+    channelId: string
+  ): Promise<{ conversationId: string; userId: string; otherUserId: string }> {
+    // Con código: así Voice distingue "la conversación no existe" de "este Chat no tiene la ruta" (404 sin código)
+    const conversationNotFound = () =>
+      new NotFoundError('Conversation not found', { code: CONVERSATION_NOT_FOUND });
+    if (!parseDmChannelId(channelId)) throw conversationNotFound();
+
+    const user = await RelationsService.getCanonical(rawUserId);
+    if (!user || user.suspended) throw notDeliverable();
+
+    let conversation: IConversation;
+    try {
+      ({ conversation } = await this.checkSend(user.userId, channelId));
+    } catch (error) {
+      if (error instanceof NotFoundError) throw conversationNotFound();
+      throw error;
+    }
+    return {
+      conversationId: toDmChannelId(conversation._id),
+      userId: user.userId,
+      otherUserId: otherParticipant(conversation, user.userId),
+    };
   }
 
   /**
