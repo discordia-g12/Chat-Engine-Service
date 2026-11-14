@@ -111,4 +111,45 @@ describe('GET /internal/metrics/messages', () => {
       assert.strictEqual(res.json().status, 404);
     }
   });
+
+  it('POST /internal/metrics/messages filtra por channelIds y agrupa por día', async () => {
+    await post('u1', '2026-11-01T10:00:00.000Z', { channelId: 'ch-a' });
+    await post('u1', '2026-11-01T12:00:00.000Z', { channelId: 'ch-b' });
+    await post('u2', '2026-11-03T10:00:00.000Z', { channelId: 'ch-a', isDeleted: true, content: '' });
+    await post('u3', '2026-11-03T10:00:00.000Z', { channelId: 'ch-other-server' });
+    await post('u4', '2026-11-03T10:00:00.000Z', { channelId: 'dm-123' });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/internal/metrics/messages',
+      payload: { from: FROM, to: TO, channelIds: ['ch-a', 'ch-b'] },
+    });
+
+    assert.strictEqual(res.statusCode, 200);
+    assert.deepStrictEqual(res.json(), {
+      from: FROM,
+      to: TO,
+      messages: 3,
+      activeUsers: 2,
+      daily: [
+        { date: '2026-11-01', messages: 2, activeUsers: 1 },
+        { date: '2026-11-03', messages: 1, activeUsers: 1 },
+      ],
+    });
+
+    const emptyRes = await app.inject({
+      method: 'POST',
+      url: '/internal/metrics/messages',
+      payload: { from: FROM, to: TO, channelIds: [] },
+    });
+    assert.strictEqual(emptyRes.statusCode, 200);
+    assert.deepStrictEqual(emptyRes.json(), { from: FROM, to: TO, messages: 0, activeUsers: 0, daily: [] });
+
+    const invalidRes = await app.inject({
+      method: 'POST',
+      url: '/internal/metrics/messages',
+      payload: { from: FROM, to: TO, channelIds: 'bad' },
+    });
+    assert.strictEqual(invalidRes.statusCode, 400);
+  });
 });
