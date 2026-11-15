@@ -42,4 +42,28 @@ export default async function internalMetricsPlugin(app: FastifyInstance) {
     const { messages, activeUsers } = await MetricsService.messageMetrics(from, to);
     return { from: from.toISOString(), to: to.toISOString(), messages, activeUsers };
   });
+
+  app.post('/internal/metrics/messages', async (req) => {
+    const body = (req.body && typeof req.body === 'object' ? req.body : {}) as Record<string, unknown>;
+    const from = parseIsoDate('from', body.from);
+    const to = parseIsoDate('to', body.to);
+    if (from.getTime() >= to.getTime()) {
+      throw new ValidationError("'from' tiene que ser anterior a 'to'.");
+    }
+    if (
+      !Array.isArray(body.channelIds) ||
+      body.channelIds.some((id) => typeof id !== 'string' || id.trim().length === 0)
+    ) {
+      throw new ValidationError("'channelIds' debe ser un arreglo de IDs de canal.");
+    }
+    const channelIds = body.channelIds.map((id) => id.trim());
+    const result = await MetricsService.channelMessageMetrics(from, to, channelIds);
+    return {
+      from: from.toISOString(),
+      to: to.toISOString(),
+      messages: result.messages,
+      activeUsers: result.activeUsers,
+      daily: result.daily,
+    };
+  });
 }
