@@ -98,20 +98,21 @@ export class PermissionService {
   }
 
   /**
-   * Canales de texto que el usuario puede ver en todos sus servidores, y sus roles
-   * (`GET /internal/users/{id}/visible-channels`). Los no leídos se calculan solo sobre estos, así no se
-   * confía en la lista que mande el cliente. Si Core no manda `role_ids` (versión anterior a #46), se
-   * toman como vacíos: solo cuentan las menciones directas y @everyone.
+   * Canales de texto que el usuario puede ver en todos sus servidores (o solo en `serverId`), y sus roles
+   * (`GET /internal/users/{id}/visible-channels`). Los no leídos y la búsqueda se calculan solo sobre estos,
+   * así no se confía en la lista que mande el cliente. Si Core no manda `role_ids` (versión anterior a #46),
+   * se toman como vacíos: solo cuentan las menciones directas y @everyone.
    *
    * @throws UpstreamUnavailableError si Server-Roles no responde o responde algo inesperado
    */
-  static async getVisibleChannels(userId: string): Promise<VisibleChannels> {
+  static async getVisibleChannels(userId: string, serverId?: string): Promise<VisibleChannels> {
     if (!userId) {
       throw new Error('User ID is required to list visible channels');
     }
 
     const coreUrl = process.env.CORE_SERVICE_URL || 'http://localhost:8000';
-    const url = `${coreUrl}/internal/users/${encodeURIComponent(userId)}/visible-channels`;
+    const query = serverId ? `?${new URLSearchParams({ server_id: serverId })}` : '';
+    const url = `${coreUrl}/internal/users/${encodeURIComponent(userId)}/visible-channels${query}`;
 
     let response: Response;
     try {

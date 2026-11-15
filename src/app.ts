@@ -5,6 +5,7 @@ import { EventConsumer } from './services/EventConsumer';
 import historyPlugin from './plugins/history';
 import messagesPlugin from './plugins/messages';
 import readStatesPlugin from './plugins/readStates';
+import searchPlugin from './plugins/search';
 import attachmentsPlugin from './plugins/attachments';
 import conversationsPlugin from './plugins/conversations';
 import internalMetricsPlugin from './plugins/internalMetrics';
@@ -34,6 +35,7 @@ function buildApp(opts: BuildAppOptions = {}): FastifyInstance {
   app.register(historyPlugin);
   app.register(messagesPlugin);
   app.register(readStatesPlugin);
+  app.register(searchPlugin);
   app.register(attachmentsPlugin);
   app.register(conversationsPlugin);
   app.register(internalMetricsPlugin);
