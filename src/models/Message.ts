@@ -8,6 +8,13 @@ export interface IAttachment {
   contentType: string;
 }
 
+export interface IReaction {
+  emoji: string;
+  count: number;
+  users: string[];
+  emojiId?: string;
+}
+
 export interface IMessage extends Document {
   content: string;
   authorId: string;
@@ -18,6 +25,11 @@ export interface IMessage extends Document {
   mentionRoleIds?: string[];
   mentionEveryone?: boolean;
   attachments?: IAttachment[];
+  edited?: boolean;
+  editedAt?: Date | null;
+  isDeleted?: boolean;
+  deletedAt?: Date | null;
+  reactions?: IReaction[];
 }
 
 const AttachmentSchema = new Schema({
@@ -28,13 +40,20 @@ const AttachmentSchema = new Schema({
   contentType: { type: String, required: true },
 }, { _id: false });
 
+const ReactionSchema = new Schema({
+  emoji: { type: String, required: true },
+  count: { type: Number, required: true, default: 1 },
+  users: { type: [String], default: [] },
+  emojiId: { type: String, default: undefined },
+}, { _id: false });
+
 const MessageSchema: Schema = new Schema({
   content: {
     type: String,
     required: [
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       function (this: any) {
-        return !this.attachments || this.attachments.length === 0;
+        return !this.isDeleted && (!this.attachments || this.attachments.length === 0);
       },
       'Content is required',
     ],
@@ -45,6 +64,9 @@ const MessageSchema: Schema = new Schema({
       {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         validator: function (this: any, v: string) {
+          if (this.isDeleted) {
+            return true;
+          }
           if (!this.attachments || this.attachments.length === 0) {
             return typeof v === 'string' && v.trim().length >= 1;
           }
@@ -78,12 +100,19 @@ const MessageSchema: Schema = new Schema({
   mentionRoleIds: { type: [String], default: undefined },
   mentionEveryone: { type: Boolean, default: undefined },
   attachments: { type: [AttachmentSchema], default: undefined },
+  edited: { type: Boolean, default: false },
+  editedAt: { type: Date, default: null },
+  isDeleted: { type: Boolean, default: false },
+  deletedAt: { type: Date, default: null },
+  reactions: { type: [ReactionSchema], default: undefined },
 }, {
   strict: true,
 });
 
 MessageSchema.index({ channelId: 1, createdAt: -1 });
 MessageSchema.index({ channelId: 1, _id: 1 });
+// Métricas del backoffice (`/internal/metrics/messages`): rango de fechas y autores distintos sin collection scan.
+MessageSchema.index({ createdAt: 1, authorId: 1 });
 
 export const Message = mongoose.model<IMessage>('Message', MessageSchema);
 

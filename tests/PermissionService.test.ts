@@ -37,7 +37,27 @@ describe('PermissionService', () => {
       mutedUntil: undefined,
       canMentionEveryone: false,
       mentionableRoleIds: [],
+      canManageMessages: false,
+      canAddReactions: false,
     });
+  });
+
+  it('returns whether the user can add reactions (200, can_add_reactions true)', async () => {
+    mock.method(globalThis, 'fetch', async () =>
+      ok({ server_id: 'srv-1', can_send: true, can_add_reactions: true })
+    );
+
+    const result = await PermissionService.getChannelAccess('reactor', 'channel-1');
+    assert.strictEqual(result.canAddReactions, true);
+  });
+
+  it('returns whether the user can manage messages (200, can_manage_messages true)', async () => {
+    mock.method(globalThis, 'fetch', async () =>
+      ok({ server_id: 'srv-1', can_send: true, can_manage_messages: true })
+    );
+
+    const result = await PermissionService.getChannelAccess('moderator', 'channel-1');
+    assert.strictEqual(result.canManageMessages, true);
   });
 
   it('returns whether the user can mention @everyone and which roles', async () => {
@@ -92,7 +112,7 @@ describe('PermissionService', () => {
     mock.method(globalThis, 'fetch', async () => ({ status: 403 }) as Response);
 
     const result = await PermissionService.getChannelAccess('banned-user', 'channel-1');
-    assert.deepStrictEqual(result, { allowed: false, canSend: false, canMentionEveryone: false, mentionableRoleIds: [] });
+    assert.deepStrictEqual(result, { allowed: false, canSend: false, canMentionEveryone: false, mentionableRoleIds: [], canManageMessages: false, canAddReactions: false });
   });
 
   it('throws if the channel does not exist (404)', async () => {
@@ -177,6 +197,46 @@ describe('PermissionService', () => {
 
     it('requires a user id', async () => {
       await assert.rejects(PermissionService.getVisibleChannels(''), /User ID is required/);
+    });
+  });
+
+  describe('getServerMemberIds', () => {
+    it('calls /member-ids and returns the user ids', async () => {
+      let calledUrl = '';
+      mock.method(globalThis, 'fetch', async (url: string | URL | Request) => {
+        calledUrl = url.toString();
+        return ok({ server_id: 'srv 1', user_ids: ['u1', 'u2'] });
+      });
+
+      assert.deepStrictEqual(await PermissionService.getServerMemberIds('srv 1'), ['u1', 'u2']);
+      assert.match(calledUrl, /\/internal\/servers\/srv%201\/member-ids$/);
+    });
+
+    it('throws NotFoundError if the server does not exist (404)', async () => {
+      mock.method(globalThis, 'fetch', async () => ({ status: 404 }) as Response);
+      await assert.rejects(PermissionService.getServerMemberIds('srv-1'), { name: 'NotFoundError' });
+    });
+
+    it('fails as unavailable when Core cannot be reached', async () => {
+      mock.method(globalThis, 'fetch', async () => {
+        throw new Error('fetch failed');
+      });
+      await assert.rejects(PermissionService.getServerMemberIds('srv-1'), { name: 'UpstreamUnavailableError' });
+    });
+
+    it('fails as unavailable on an unexpected status or body', async () => {
+      mock.method(globalThis, 'fetch', async () => ({ status: 500 }) as Response);
+      await assert.rejects(PermissionService.getServerMemberIds('srv-1'), { name: 'UpstreamUnavailableError' });
+
+      mock.method(globalThis, 'fetch', async () => ok({ user_ids: [1] }));
+      await assert.rejects(PermissionService.getServerMemberIds('srv-1'), { name: 'UpstreamUnavailableError' });
+
+      mock.method(globalThis, 'fetch', async () => ({ status: 200, json: async () => { throw new Error('no body'); } }) as unknown as Response);
+      await assert.rejects(PermissionService.getServerMemberIds('srv-1'), { name: 'UpstreamUnavailableError' });
+    });
+
+    it('requires a server id', async () => {
+      await assert.rejects(PermissionService.getServerMemberIds(''), /Server ID is required/);
     });
   });
 });

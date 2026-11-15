@@ -1,4 +1,5 @@
 import type { WebSocket } from 'ws';
+import { isDmChannel, isInboxChannel } from '../helpers/directMessages';
 
 export interface ClientSession {
   userId: string;
@@ -95,10 +96,14 @@ export class SessionManager {
     return set ? Array.from(set) : [];
   }
 
+  /**
+   * Sesiones del usuario en canales de servidor. Las de DM e inbox quedan afuera: su `serverId` es vacío, y
+   * un evento de servidor sin `server_id` (que acá significa "todos sus servidores") no debe cerrarlas.
+   */
   static getUserSessions(userId: string, serverId?: string): ClientSession[] {
     const set = this.userSessions.get(userId);
     if (!set) return [];
-    const sessions = Array.from(set);
+    const sessions = Array.from(set).filter((s) => !isDmChannel(s.channelId) && !isInboxChannel(s.channelId));
     if (serverId) return sessions.filter(s => s.serverId === serverId);
     return sessions;
   }
@@ -148,6 +153,47 @@ export class SessionManager {
         session.socket.close(code, reason);
       }
       this.unregister(session.socket);
+    }
+  }
+
+  /**
+   * Cierra TODAS las sesiones del usuario: canales de cualquier servidor, DMs y bandeja. A diferencia de
+   * disconnectUser (eventos de servidor, que no tocan DMs ni bandeja), es para cuando la cuenta entera queda
+   * afuera: suspensión por la plataforma.
+   */
+  static disconnectAllSessions(userId: string, reason: string, code: number): void {
+    for (const session of Array.from(this.userSessions.get(userId) ?? [])) {
+      this.closeSession(session, reason, code);
+    }
+  }
+
+  /** Cierra una sesión (si sigue abierta) y la saca del registro. */
+  static closeSession(session: ClientSession, reason: string, code: number): void {
+    if (session.socket.readyState === 1) {
+      session.socket.close(code, reason);
+    }
+    this.unregister(session.socket);
+  }
+
+  /**
+   * Cierra todas las sesiones abiertas en canales de ese servidor (servidor eliminado o suspendido por el staff).
+   */
+  static disconnectServer(serverId: string, reason = 'Server deleted', code = 4004): void {
+    for (const session of this.getServerSessions(serverId)) {
+      this.closeSession(session, reason, code);
+    }
+  }
+
+  /**
+   * Cierra todas las sesiones abiertas en ese canal (canal eliminado).
+   */
+  static disconnectChannel(channelId: string, reason = 'Channel deleted', code = 4004): void {
+    const sockets = this.getChannelSockets(channelId);
+    for (const socket of sockets) {
+      if (socket.readyState === 1) {
+        socket.close(code, reason);
+      }
+      this.unregister(socket);
     }
   }
 

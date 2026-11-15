@@ -4,6 +4,8 @@ import { channelAccessGuard } from '../helpers/auth';
 import { ForbiddenError } from '../errors';
 import { PubSubService } from '../services/PubSubService';
 import { ReadStateService } from '../services/ReadStateService';
+import { ConversationService } from '../services/ConversationService';
+import { isDmChannel } from '../helpers/directMessages';
 
 export default async function historyPlugin(app: FastifyInstance) {
   app.get('/channels/:channelId/messages', { preValidation: channelAccessGuard }, async (req) => {
@@ -26,8 +28,13 @@ export default async function historyPlugin(app: FastifyInstance) {
       attachments?: MessageAttachmentPayload[];
     };
 
-    const savedPayload = await ChatService.sendMessage(userId, channelId, content, attachments, true);
-    await PubSubService.publish(channelId, savedPayload);
+    let savedPayload;
+    if (isDmChannel(channelId)) {
+      savedPayload = await ConversationService.sendMessage(userId, channelId, content, attachments);
+    } else {
+      savedPayload = await ChatService.sendMessage(userId, channelId, content, attachments, true);
+      await PubSubService.publish(channelId, savedPayload);
+    }
     ReadStateService.markRead(userId, channelId, savedPayload.id).catch((err) =>
       req.log.warn({ err, channelId }, 'Failed to update sender read state')
     );

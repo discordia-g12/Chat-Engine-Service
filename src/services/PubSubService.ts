@@ -1,6 +1,7 @@
 import type Redis from 'ioredis';
 import { getRedis, getSubscriberRedis } from '../config/redis';
 import { SessionManager } from './SessionManager';
+import { inboxChannelId, isInboxChannel } from '../helpers/directMessages';
 
 export interface PubSubLogger {
   info(obj: object, msg?: string): void;
@@ -27,15 +28,16 @@ export class PubSubService {
   private static subscribedChannels = new Set<string>();
   private static messageHandler: ((channel: string, message: string) => void) | null = null;
 
+  /** Los inbox pasan por acá como un canal más, con su propia clave (`inbox:<userId>`). */
   static channelKey(channelId: string): string {
-    return `${REDIS_CHANNEL_PREFIX}${channelId}`;
+    return isInboxChannel(channelId) ? channelId : `${REDIS_CHANNEL_PREFIX}${channelId}`;
   }
 
   static channelIdFromKey(key: string): string | null {
     if (key.startsWith(REDIS_CHANNEL_PREFIX)) {
       return key.slice(REDIS_CHANNEL_PREFIX.length);
     }
-    return null;
+    return isInboxChannel(key) ? key : null;
   }
 
   static isStarted(): boolean {
@@ -185,6 +187,11 @@ export class PubSubService {
       this.logger.error({ err, channelId }, 'Failed to publish message to Redis, falling back to local broadcast');
       this.broadcastToLocal(channelId, rawPayload);
     }
+  }
+
+  /** Publica en el socket por usuario, en la instancia en la que esté conectado. */
+  static async publishToInbox(userId: string, payload: unknown): Promise<void> {
+    await this.publish(inboxChannelId(userId), payload);
   }
 
   private static handleIncomingMessage(channel: string, message: string): void {

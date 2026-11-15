@@ -1,9 +1,9 @@
-import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 import { PayloadTooLargeError, ValidationError } from '../errors';
 import { MessageAttachmentPayload } from './ChatService';
+import { fileSystem as fs } from '../helpers/fs';
 
 export const MAX_ATTACHMENT_SIZE = 10 * 1024 * 1024; // 10 MB
 

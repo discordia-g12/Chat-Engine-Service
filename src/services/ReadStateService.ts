@@ -24,6 +24,11 @@ function mentionsOf(userId: string, roleIds: string[]) {
   ];
 }
 
+/** Mensajes de otros posteriores a lo leído. Sin `lastRead`, todos los del canal. */
+function unreadFilter(userId: string, channelId: string, lastRead?: Types.ObjectId) {
+  return { channelId, ...(lastRead ? { _id: { $gt: lastRead } } : {}), authorId: { $ne: userId } };
+}
+
 /** Un _id que queda después de todo lo enviado hasta ahora (y antes de lo que se envíe después). */
 function idForNow(): Types.ObjectId {
   return Types.ObjectId.createFromTime(Math.floor(Date.now() / 1000));
@@ -87,7 +92,7 @@ export class ReadStateService {
     // Las menciones son un subconjunto de lo no leído: solo se cuentan en los canales con algo sin leer
     const counts = await Promise.all(
       channelIds.map(async (channelId) => {
-        const unread = { channelId, _id: { $gt: lastRead.get(channelId) }, authorId: { $ne: userId } };
+        const unread = unreadFilter(userId, channelId, lastRead.get(channelId));
         const unreadCount = await Message.countDocuments(unread, { limit: UNREAD_COUNT_CAP });
         const mentionCount =
           unreadCount === 0
@@ -100,6 +105,27 @@ export class ReadStateService {
       })
     );
     return counts.filter((c) => c.unreadCount > 0);
+  }
+
+  /**
+   * No leídos por conversación, con el mismo cálculo y el mismo tope que los canales. A diferencia de un
+   * canal, una conversación sin registro no arranca leída: lo que llegó es para este usuario.
+   */
+  static async getConversationUnread(userId: string, channelIds: string[]): Promise<Map<string, number>> {
+    if (channelIds.length === 0) return new Map();
+
+    const states = await ReadState.find({ userId, channelId: { $in: channelIds } }).lean();
+    const lastRead = new Map(states.map((s) => [s.channelId, s.lastReadMessageId as Types.ObjectId]));
+
+    const counts = await Promise.all(
+      channelIds.map(async (channelId): Promise<[string, number]> => [
+        channelId,
+        await Message.countDocuments(unreadFilter(userId, channelId, lastRead.get(channelId)), {
+          limit: UNREAD_COUNT_CAP,
+        }),
+      ])
+    );
+    return new Map(counts);
   }
 
   /**

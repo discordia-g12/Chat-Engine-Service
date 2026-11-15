@@ -1,6 +1,9 @@
 import { FastifyRequest } from 'fastify';
 import { PermissionService, ChannelAccessResult } from '../services/PermissionService';
+import { RelationsService } from '../services/RelationsService';
+import { ConversationService } from '../services/ConversationService';
 import { ForbiddenError, UnauthorizedError } from '../errors';
+import { isDmChannel } from './directMessages';
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -10,8 +13,14 @@ declare module 'fastify' {
     serverId?: string;
     /** Whether the caller can write in the channel (they can always read once the guard passes). */
     canSend?: boolean;
+    /** Whether the caller has MANAGE_MESSAGES or admin rights to delete messages of others. */
+    canManageMessages?: boolean;
+    /** Whether the caller has ADD_REACTIONS or is in a DM to add reactions to messages. */
+    canAddReactions?: boolean;
     /** When the caller's mute expires, if the mute is the only thing preventing them from writing. */
     mutedUntil?: Date;
+    /** Full channel access result resolved during access validation. */
+    channelAccess?: ChannelAccessResult;
   }
 }
 
@@ -31,6 +40,20 @@ export function requireAuth(req: FastifyRequest): string {
   return userId;
 }
 
+/**
+ * Id real del usuario. En los DMs se guarda y se compara siempre este, nunca el `X-User-Id` crudo, que con
+ * login federado puede ser un alias. Sin cuenta en Auth o con la cuenta suspendida no hay DMs.
+ *
+ * @throws UpstreamUnavailableError si Auth no responde
+ */
+export async function requireCanonicalUser(req: FastifyRequest): Promise<string> {
+  const user = await RelationsService.getCanonical(requireAuth(req));
+  if (!user || user.suspended) {
+    throw new ForbiddenError('User cannot use direct messages');
+  }
+  return user.userId;
+}
+
 /** Exige permiso de VER el canal. Que pueda escribir viene en el resultado (`canSend`). */
 export async function requireChannelAccess(userId: string, channelId: string): Promise<ChannelAccessResult> {
   const result = await PermissionService.getChannelAccess(userId, channelId);
@@ -46,13 +69,36 @@ export async function requireChannelAccess(userId: string, channelId: string): P
  *
  * On WebSocket routes it runs BEFORE the HTTP upgrade, so rejected clients get
  * a real HTTP status and the handler can attach its listeners synchronously.
+ *
+ * Un `dm-…` no pasa por Core: alcanza con ser participante. `canSend` queda en true porque en un DM la
+ * relación y el estado se revisan en cada envío (ConversationService), no al conectar.
  */
 export async function channelAccessGuard(req: FastifyRequest): Promise<void> {
   const { channelId } = req.params as { channelId: string };
+
+  if (isDmChannel(channelId)) {
+    const canonicalId = await requireCanonicalUser(req);
+    await ConversationService.requireParticipant(canonicalId, channelId);
+    req.userId = canonicalId;
+    req.serverId = '';
+    req.canSend = true;
+    req.canManageMessages = false;
+    req.canAddReactions = true;
+    return;
+  }
+
   const userId = requireAuth(req);
   const access = await requireChannelAccess(userId, channelId);
   req.userId = userId;
   req.serverId = access.serverId;
   req.canSend = access.canSend;
   req.mutedUntil = access.mutedUntil;
+  req.canManageMessages = access.canManageMessages;
+  req.canAddReactions = access.canAddReactions;
+  req.channelAccess = access;
+}
+
+/** `preValidation` de las rutas de conversaciones e inbox: deja en `req.userId` el id canónico. */
+export async function canonicalUserGuard(req: FastifyRequest): Promise<void> {
+  req.userId = await requireCanonicalUser(req);
 }

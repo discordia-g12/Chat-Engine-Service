@@ -1,8 +1,18 @@
 import { describe, it, beforeEach, afterEach, mock } from 'node:test';
 import assert from 'node:assert';
-import { EventConsumer, type EventPayload } from '../src/services/EventConsumer';
+import {
+  ACCOUNT_SUSPENDED_CLOSE_CODE,
+  EventConsumer,
+  SERVER_SUSPENDED_CLOSE_CODE,
+  type EventPayload,
+} from '../src/services/EventConsumer';
+import { NotFoundError, UpstreamUnavailableError } from '../src/errors';
+import { ChatService } from '../src/services/ChatService';
 import { PermissionService } from '../src/services/PermissionService';
+import { PubSubService } from '../src/services/PubSubService';
 import { SessionManager } from '../src/services/SessionManager';
+import { inboxChannelId, toDmChannelId } from '../src/helpers/directMessages';
+import { Types } from 'mongoose';
 import type { WebSocket } from 'ws';
 
 function createMockSocket(): WebSocket {
@@ -343,5 +353,264 @@ describe('EventConsumer', () => {
     await EventConsumer.handleEvent('member.banned', {} as EventPayload);
     await EventConsumer.handleEvent('unknown.event', { user_id: 'u1' });
     await EventConsumer.handleEvent('role.permissions_updated', {});
+  });
+});
+
+describe('EventConsumer: cuenta suspendida (user.suspended de Auth-User)', () => {
+  beforeEach(() => SessionManager.clear());
+
+  const closedWith = (socket: WebSocket) =>
+    (socket as unknown as { _closedWith: () => { code: number; reason: string } | null })._closedWith();
+
+  const register = (userId: string, channelId: string, serverId: string) => {
+    const socket = createMockSocket();
+    SessionManager.register({ userId, channelId, serverId, socket, canSend: true, connectedAt: new Date() });
+    return socket;
+  };
+
+  it('cierra todas las conexiones de la cuenta, en cualquier servidor, DMs y bandeja, con 4010', async () => {
+    const inServer = register('auth0|u1', 'chan-1', 'srv-1');
+    const inOtherServer = register('auth0|u1', 'chan-2', 'srv-2');
+    const dm = register('auth0|u1', toDmChannelId(new Types.ObjectId()), '');
+    const inbox = register('auth0|u1', inboxChannelId('auth0|u1'), '');
+    const someoneElse = register('auth0|u2', 'chan-1', 'srv-1');
+
+    await EventConsumer.handleEvent('user.suspended', { user_id: 'auth0|u1', identities: ['auth0|u1'] });
+
+    for (const socket of [inServer, inOtherServer, dm, inbox]) {
+      assert.deepStrictEqual(closedWith(socket), { code: ACCOUNT_SUSPENDED_CLOSE_CODE, reason: 'Account suspended' });
+    }
+    assert.strictEqual(closedWith(someoneElse), null);
+    assert.strictEqual(SessionManager.getChannelSockets(inboxChannelId('auth0|u1')).length, 0);
+    assert.strictEqual(SessionManager.getUserSessions('auth0|u1').length, 0);
+  });
+
+  it('también cierra las conexiones de sus identidades federadas', async () => {
+    const federated = register('google-oauth2|9', 'chan-1', 'srv-1');
+
+    await EventConsumer.handleEvent('user.suspended', {
+      user_id: 'auth0|u1',
+      identities: ['auth0|u1', 'google-oauth2|9', 42, ''],
+    });
+
+    assert.strictEqual(closedWith(federated)?.code, ACCOUNT_SUSPENDED_CLOSE_CODE);
+  });
+
+  it('ignora un evento sin identidades', async () => {
+    const socket = register('auth0|u1', 'chan-1', 'srv-1');
+
+    await EventConsumer.handleEvent('user.suspended', { identities: 'auth0|u1' });
+
+    assert.strictEqual(closedWith(socket), null);
+  });
+});
+
+describe('EventConsumer: servidor suspendido (server.suspended de Server-Roles)', () => {
+  beforeEach(() => SessionManager.clear());
+
+  const closedWith = (socket: WebSocket) =>
+    (socket as unknown as { _closedWith: () => { code: number; reason: string } | null })._closedWith();
+
+  const register = (userId: string, channelId: string, serverId: string) => {
+    const socket = createMockSocket();
+    SessionManager.register({ userId, channelId, serverId, socket, canSend: true, connectedAt: new Date() });
+    return socket;
+  };
+
+  it('cierra con 4011 las sesiones de todos los miembros en los canales de ese servidor', async () => {
+    const ana = register('ana', 'chan-1', 'srv-1');
+    const beto = register('beto', 'chan-2', 'srv-1');
+    const anaOtherServer = register('ana', 'chan-9', 'srv-2');
+    const anaDm = register('ana', toDmChannelId(new Types.ObjectId()), '');
+    const anaInbox = register('ana', inboxChannelId('ana'), '');
+
+    await EventConsumer.handleEvent('server.suspended', { server_id: 'srv-1', voice_channel_ids: [] });
+
+    for (const socket of [ana, beto]) {
+      assert.deepStrictEqual(closedWith(socket), { code: SERVER_SUSPENDED_CLOSE_CODE, reason: 'Server suspended' });
+    }
+    // Lo que no es de ese servidor sigue abierto
+    for (const socket of [anaOtherServer, anaDm, anaInbox]) {
+      assert.strictEqual(closedWith(socket), null);
+    }
+    assert.strictEqual(SessionManager.getServerSessions('srv-1').length, 0);
+    assert.strictEqual(SessionManager.getServerSessions('srv-2').length, 1);
+  });
+
+  it('ignora el evento sin server_id', async () => {
+    const socket = register('ana', 'chan-1', 'srv-1');
+
+    await EventConsumer.handleEvent('server.suspended', {});
+
+    assert.strictEqual(closedWith(socket), null);
+  });
+});
+
+describe('EventConsumer: eliminación de servidor y canal (server.deleted, channel.deleted)', () => {
+  beforeEach(() => {
+    SessionManager.clear();
+    mock.restoreAll();
+  });
+
+  afterEach(() => {
+    mock.restoreAll();
+  });
+
+  const closedWith = (socket: WebSocket) =>
+    (socket as unknown as { _closedWith: () => { code: number; reason: string } | null })._closedWith();
+
+  const register = (userId: string, channelId: string, serverId: string) => {
+    const socket = createMockSocket();
+    SessionManager.register({ userId, channelId, serverId, socket, canSend: true, connectedAt: new Date() });
+    return socket;
+  };
+
+  it('server.deleted desconecta todas las sesiones del servidor con 4004 y borra mensajes de sus canales', async () => {
+    const srv1Socket1 = register('u1', 'chan-1', 'srv-1');
+    const srv1Socket2 = register('u2', 'chan-2', 'srv-1');
+    const otherSrvSocket = register('u1', 'chan-9', 'srv-2');
+    const dmSocket = register('u1', toDmChannelId(new Types.ObjectId()), '');
+
+    let deletedChannels: string[] = [];
+    mock.method(ChatService, 'deleteChannelsMessages', async (ids: string[]) => {
+      deletedChannels = ids;
+      return ids.length;
+    });
+
+    await EventConsumer.handleEvent('server.deleted', {
+      server_id: 'srv-1',
+      channel_ids: ['chan-1', 'chan-2'],
+    });
+
+    assert.deepStrictEqual(closedWith(srv1Socket1), { code: 4004, reason: 'Server deleted' });
+    assert.deepStrictEqual(closedWith(srv1Socket2), { code: 4004, reason: 'Server deleted' });
+    assert.strictEqual(closedWith(otherSrvSocket), null);
+    assert.strictEqual(closedWith(dmSocket), null);
+    assert.deepStrictEqual(deletedChannels, ['chan-1', 'chan-2']);
+    assert.strictEqual(SessionManager.getServerSessions('srv-1').length, 0);
+  });
+
+  it('server.deleted avisa SERVER_DELETED por el inbox a los miembros incluidos en el evento', async () => {
+    mock.method(ChatService, 'deleteChannelsMessages', async () => 0);
+    const published: Array<{ userId: string; event: unknown }> = [];
+    mock.method(PubSubService, 'publishToInbox', async (userId: string, event: unknown) => {
+      published.push({ userId, event });
+    });
+
+    await EventConsumer.handleEvent('server.deleted', {
+      server_id: 'srv-1',
+      channel_ids: ['chan-1'],
+      member_ids: ['u1', 'u2', 'u1'],
+    });
+
+    assert.deepStrictEqual(published, [
+      { userId: 'u1', event: { type: 'SERVER_DELETED', serverId: 'srv-1' } },
+      { userId: 'u2', event: { type: 'SERVER_DELETED', serverId: 'srv-1' } },
+    ]);
+  });
+
+  it('channel.deleted desconecta todas las sesiones de ese canal con 4004 y borra sus mensajes', async () => {
+    const chan1Socket1 = register('u1', 'chan-1', 'srv-1');
+    const chan1Socket2 = register('u2', 'chan-1', 'srv-1');
+    const chan2Socket = register('u3', 'chan-2', 'srv-1');
+
+    let deletedChannel = '';
+    mock.method(ChatService, 'deleteChannelMessages', async (id: string) => {
+      deletedChannel = id;
+      return 1;
+    });
+
+    await EventConsumer.handleEvent('channel.deleted', {
+      server_id: 'srv-1',
+      channel_id: 'chan-1',
+    });
+
+    assert.deepStrictEqual(closedWith(chan1Socket1), { code: 4004, reason: 'Channel deleted' });
+    assert.deepStrictEqual(closedWith(chan1Socket2), { code: 4004, reason: 'Channel deleted' });
+    assert.strictEqual(closedWith(chan2Socket), null);
+    assert.strictEqual(deletedChannel, 'chan-1');
+    assert.strictEqual(SessionManager.getChannelSockets('chan-1').length, 0);
+  });
+});
+
+
+describe('EventConsumer: configuración del servidor (server.updated)', () => {
+  afterEach(() => {
+    mock.restoreAll();
+  });
+
+  /** Lo que se publicó en el inbox de cada usuario. */
+  function captureInbox() {
+    const published: Array<{ userId: string; event: unknown }> = [];
+    mock.method(PubSubService, 'publishToInbox', async (userId: string, event: unknown) => {
+      published.push({ userId, event });
+    });
+    return published;
+  }
+
+  it('avisa SERVER_UPDATED por el inbox a cada miembro del servidor, solo con el id', async () => {
+    const asked: string[] = [];
+    mock.method(PermissionService, 'getServerMemberIds', async (serverId: string) => {
+      asked.push(serverId);
+      return ['owner', 'member-1', 'member-2'];
+    });
+    const published = captureInbox();
+
+    await EventConsumer.handleEvent('server.updated', { server_id: 'srv-1' });
+
+    assert.deepStrictEqual(asked, ['srv-1']);
+    assert.deepStrictEqual(published, [
+      { userId: 'owner', event: { type: 'SERVER_UPDATED', serverId: 'srv-1' } },
+      { userId: 'member-1', event: { type: 'SERVER_UPDATED', serverId: 'srv-1' } },
+      { userId: 'member-2', event: { type: 'SERVER_UPDATED', serverId: 'srv-1' } },
+    ]);
+  });
+
+  it('no avisa a nadie si el evento no trae server_id', async () => {
+    const getMembers = mock.method(PermissionService, 'getServerMemberIds', async () => ['u1']);
+    const published = captureInbox();
+
+    await EventConsumer.handleEvent('server.updated', {});
+
+    assert.strictEqual(getMembers.mock.callCount(), 0);
+    assert.deepStrictEqual(published, []);
+  });
+
+  it('no hace nada si el servidor ya no existe (se borró antes de procesar el evento)', async () => {
+    mock.method(PermissionService, 'getServerMemberIds', async () => {
+      throw new NotFoundError('Server not found');
+    });
+    const published = captureInbox();
+
+    await EventConsumer.handleEvent('server.updated', { server_id: 'srv-gone' });
+
+    assert.deepStrictEqual(published, []);
+  });
+
+  it('si Server-Roles no responde, lo registra y descarta el aviso sin romper el consumidor', async () => {
+    mock.method(PermissionService, 'getServerMemberIds', async () => {
+      throw new UpstreamUnavailableError('down');
+    });
+    const warn = mock.method(console, 'warn', () => undefined);
+    const published = captureInbox();
+
+    await EventConsumer.handleEvent('server.updated', { server_id: 'srv-1' });
+
+    assert.deepStrictEqual(published, []);
+    assert.strictEqual(warn.mock.callCount(), 1);
+  });
+
+  it('no cierra ni toca las sesiones de chat abiertas en el servidor', async () => {
+    SessionManager.clear();
+    const socket = createMockSocket();
+    SessionManager.register({ userId: 'u1', channelId: 'c1', serverId: 'srv-1', socket, canSend: true, connectedAt: new Date() });
+    mock.method(PermissionService, 'getServerMemberIds', async () => ['u1']);
+    captureInbox();
+
+    await EventConsumer.handleEvent('server.updated', { server_id: 'srv-1' });
+
+    assert.strictEqual(SessionManager.getServerSessions('srv-1').length, 1);
+    assert.strictEqual((socket as unknown as { _closedWith: () => unknown })._closedWith(), null);
+    SessionManager.clear();
   });
 });
