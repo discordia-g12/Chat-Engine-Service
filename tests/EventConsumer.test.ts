@@ -300,6 +300,22 @@ describe('EventConsumer', () => {
     assert.strictEqual(SessionManager.canSend(ws), false);
   });
 
+  it('role.channel_permissions_updated re-checks the server sessions with the channel override applied', async () => {
+    // Se le negó SEND_MESSAGES al rol solo en chan-1: Server-Roles lo resuelve por canal
+    mockAccess((_userId, channelId) => channelId !== 'chan-1');
+    const wsOverridden = register('u-ov', 'chan-1', 'srv-ov', true);
+    const wsOtherChannel = register('u-ov', 'chan-2', 'srv-ov', true);
+
+    await EventConsumer.handleEvent('role.channel_permissions_updated', {
+      server_id: 'srv-ov',
+      channel_id: 'chan-1',
+      role_id: 'r1',
+    });
+
+    assert.strictEqual(SessionManager.canSend(wsOverridden), false);
+    assert.strictEqual(SessionManager.canSend(wsOtherChannel), true);
+  });
+
   it('member.role_assigned re-checks only that user on that server and can enable writing', async () => {
     mockAccess((userId) => userId === 'u-new-role');
     const ws = register('u-new-role', 'chan-1', 'srv-1', false);

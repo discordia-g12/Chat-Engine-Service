@@ -273,8 +273,13 @@ export class EventConsumer {
       return;
     }
 
-    // Cambió lo que puede hacer un rol (o se borró): afecta a todos los que lo tengan en el servidor
-    if (routingKey === 'role.permissions_updated' || routingKey === 'role.deleted') {
+    // Cambió lo que puede hacer un rol (o se borró, o cambió su excepción en un canal): afecta a todos los
+    // que lo tengan en el servidor
+    if (
+      routingKey === 'role.permissions_updated' ||
+      routingKey === 'role.deleted' ||
+      routingKey === 'role.channel_permissions_updated'
+    ) {
       if (serverId) await this.recheckSendPermission(SessionManager.getServerSessions(serverId));
       return;
     }
