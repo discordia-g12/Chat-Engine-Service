@@ -168,6 +168,17 @@ describe('PermissionService', () => {
       assert.match(calledUrl, /\/internal\/users\/user%201\/visible-channels$/);
     });
 
+    it('filters by server when serverId is given (message search)', async () => {
+      let calledUrl = '';
+      mock.method(globalThis, 'fetch', async (url: string | URL | Request) => {
+        calledUrl = url.toString();
+        return ok({ channel_ids: ['c1'], role_ids: [] });
+      });
+
+      await PermissionService.getVisibleChannels('user-1', 'srv-1');
+      assert.match(calledUrl, /\/internal\/users\/user-1\/visible-channels\?server_id=srv-1$/);
+    });
+
     it('takes the roles as empty when Core does not send them (before #46)', async () => {
       mock.method(globalThis, 'fetch', async () => ok({ channel_ids: ['c1'] }));
       assert.deepStrictEqual(await PermissionService.getVisibleChannels('user-1'), { channelIds: ['c1'], roleIds: [] });

@@ -101,6 +101,11 @@ En producción está detrás de Kong, bajo `/api/v1/chat` (Kong saca ese prefijo
   Ver ADR-03.
 - `GET /channels/:channelId/messages?limit=&before=`: historial en orden cronológico (50 por defecto).
   `before` es el id del mensaje más viejo que ya tiene el cliente, para cargar los anteriores.
+- `GET /servers/:serverId/messages/search?q=&authorId=&limit=&before=`: busca mensajes del servidor por
+  texto (`q`, sin distinguir mayúsculas ni tildes), por autor (`authorId`) o las dos cosas, solo en los
+  canales que el usuario puede ver. Del más nuevo al más viejo, 25 por página (hasta 50):
+  `{ messages, hasMore, nextCursor }`, con `nextCursor` como `before` de la siguiente. Sin coincidencias,
+  `messages` vacío. Ver ADR-04.
 - `GET /unread`: canales con mensajes sin leer, con `unreadCount` y `mentionCount` (hasta 100 cada uno). Ver
   ADR-02 y ADR-03.
 - `POST /channels/:channelId/read`: marca el canal leído hasta `messageId` (body opcional) o hasta el

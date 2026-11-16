@@ -6,6 +6,12 @@ import { ChannelAccessResult, PermissionService } from './PermissionService';
 import { ForbiddenError, NotFoundError, ValidationError } from '../errors';
 import { parseMentions } from '../helpers/mentions';
 import { isDmChannel } from '../helpers/directMessages';
+import {
+  DEFAULT_SEARCH_LIMIT,
+  MAX_SEARCH_LIMIT,
+  MAX_SEARCH_QUERY_LENGTH,
+  buildContainsPattern,
+} from '../helpers/search';
 import { EventConsumer } from './EventConsumer';
 
 /** Menciones que notifican. Un @everyone o un rol sin permiso queda en el texto pero no acá. */
@@ -44,6 +50,31 @@ export interface MessagePayload {
   isDeleted?: boolean;
   deletedAt?: Date | null;
   type?: string;
+}
+
+export interface MessageSearchFilters {
+  /** Texto a buscar dentro del contenido. */
+  query?: string;
+  /** Solo mensajes de este autor (su X-User-Id). */
+  authorId?: string;
+  limit?: number;
+  /** Cursor: id del último mensaje de la página anterior. */
+  before?: string;
+}
+
+export interface MessageSearchPage {
+  /** Del más nuevo al más viejo. Vacío si no hay coincidencias. */
+  messages: MessagePayload[];
+  hasMore: boolean;
+  nextCursor: string | null;
+}
+
+// Los ids de servidor de Core son UUID: otra cosa haría que Core responda 422 (y acá sería un 503)
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** ObjectId de 24 caracteres hex (isValid de mongoose también acepta strings de 12 bytes cualquiera). */
+function isObjectIdString(value: unknown): value is string {
+  return typeof value === 'string' && /^[0-9a-f]{24}$/i.test(value);
 }
 
 function toPayload(msg: IMessage): MessagePayload {
@@ -111,6 +142,56 @@ export class ChatService {
       .lean<IMessage[]>();
 
     return messages.reverse().map(toPayload);
+  }
+
+  /**
+   * Busca mensajes de un servidor por texto, por autor o por las dos cosas (ver ADR-04). Solo en los canales
+   * de texto que el usuario puede ver: la lista la da Core, nunca el cliente. Los mensajes borrados no
+   * aparecen. Los resultados van del más nuevo al más viejo; `before` es el `nextCursor` de la página anterior.
+   *
+   * @throws ValidationError si no hay término ni autor, o algún filtro no es válido
+   * @throws UpstreamUnavailableError si Core no responde
+   */
+  static async searchMessages(userId: string, serverId: string, filters: MessageSearchFilters): Promise<MessageSearchPage> {
+    const term = typeof filters.query === 'string' ? filters.query.trim() : '';
+    const authorId = typeof filters.authorId === 'string' ? filters.authorId.trim() : '';
+    const limit = filters.limit ?? DEFAULT_SEARCH_LIMIT;
+
+    if (!UUID.test(serverId)) {
+      throw new ValidationError('serverId must be a valid server id');
+    }
+    if (!term && !authorId) {
+      throw new ValidationError('A search term (q) or an author (authorId) is required');
+    }
+    if (term.length > MAX_SEARCH_QUERY_LENGTH) {
+      throw new ValidationError(`The search term cannot exceed ${MAX_SEARCH_QUERY_LENGTH} characters`);
+    }
+    if (!Number.isInteger(limit) || limit < 1 || limit > MAX_SEARCH_LIMIT) {
+      throw new ValidationError(`limit must be an integer between 1 and ${MAX_SEARCH_LIMIT}`);
+    }
+    if (filters.before !== undefined && !isObjectIdString(filters.before)) {
+      throw new ValidationError('before must be a valid message id');
+    }
+
+    const { channelIds } = await PermissionService.getVisibleChannels(userId, serverId);
+    if (channelIds.length === 0) {
+      return { messages: [], hasMore: false, nextCursor: null };
+    }
+
+    const query = {
+      channelId: { $in: channelIds },
+      isDeleted: { $ne: true },
+      ...(term ? { content: { $regex: buildContainsPattern(term), $options: 'i' } } : {}),
+      ...(authorId ? { authorId } : {}),
+      ...(filters.before ? { _id: { $lt: new mongoose.Types.ObjectId(filters.before) } } : {}),
+    };
+
+    // Uno de más para saber si hay otra página sin contar todo
+    const found = await Message.find(query).sort({ _id: -1 }).limit(limit + 1).lean<IMessage[]>();
+    const page = found.slice(0, limit).map(toPayload);
+    const hasMore = found.length > limit;
+
+    return { messages: page, hasMore, nextCursor: hasMore ? page[page.length - 1].id : null };
   }
 
   /**
