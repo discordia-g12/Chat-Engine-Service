@@ -3,7 +3,7 @@ import mongoose from 'mongoose';
 import { Message, IMessage } from '../models/Message';
 import { ReadState } from '../models/ReadState';
 import { ChannelAccessResult, PermissionService } from './PermissionService';
-import { ForbiddenError, NotFoundError, ValidationError } from '../errors';
+import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from '../errors';
 import { parseMentions } from '../helpers/mentions';
 import { isDmChannel } from '../helpers/directMessages';
 import {
@@ -49,8 +49,14 @@ export interface MessagePayload {
   editedAt?: Date | null;
   isDeleted?: boolean;
   deletedAt?: Date | null;
+  pinned: boolean;
+  pinnedAt?: Date | null;
+  pinnedBy?: string | null;
   type?: string;
 }
+
+/** Máximo de mensajes fijados por canal o DM. */
+export const PINNED_LIMIT = 50;
 
 export interface MessageSearchFilters {
   /** Texto a buscar dentro del contenido. */
@@ -112,6 +118,9 @@ function toPayload(msg: IMessage): MessagePayload {
           ...(r.emojiId ? { emojiId: r.emojiId } : {}),
         }))
       : [],
+    // Siempre viaja `pinned` (también en false) para que un desfijado pise el estado del cliente.
+    pinned: msg.pinned === true && !isDeleted,
+    ...(msg.pinned && !isDeleted ? { pinnedAt: msg.pinnedAt ?? null, pinnedBy: msg.pinnedBy ?? null } : {}),
     ...(isDeleted ? { type: 'deleted', isDeleted: true, deletedAt: msg.deletedAt ?? null } : {}),
   };
 }
@@ -450,6 +459,10 @@ export class ChatService {
     message.mentionUserIds = undefined;
     message.mentionRoleIds = undefined;
     message.mentionEveryone = undefined;
+    // Un mensaje borrado no queda fijado: libera el lugar en el límite.
+    message.pinned = false;
+    message.pinnedAt = null;
+    message.pinnedBy = null;
 
     await message.save();
 
@@ -570,5 +583,69 @@ export class ChatService {
       ...payload,
       type: 'MESSAGE_REACTION_UPDATED',
     };
+  }
+
+  /**
+   * Fija o desfija un mensaje. En canales de servidor requiere MANAGE_MESSAGES; en DMs alcanza con ser
+   * participante (lo valida `channelAccessGuard`). Es idempotente: si ya estaba en ese estado, `changed` es false
+   * y no hay que publicar nada.
+   *
+   * @param userId Usuario que fija o desfija
+   * @param channelId Canal (o `dm-<id>`) donde está el mensaje
+   * @param messageId ID del mensaje
+   * @param pinned true para fijar, false para desfijar
+   * @param canManageMessages Si el usuario tiene MANAGE_MESSAGES en el canal (ignorado en DMs)
+   */
+  static async setPinned(
+    userId: string,
+    channelId: string,
+    messageId: string,
+    pinned: boolean,
+    canManageMessages = false
+  ): Promise<{ payload: MessagePayload; changed: boolean }> {
+    if (!isDmChannel(channelId) && !canManageMessages) {
+      throw new ForbiddenError('You do not have permission to pin messages in this channel');
+    }
+
+    if (!isObjectIdString(messageId)) {
+      throw new NotFoundError('Message not found');
+    }
+
+    const message = await Message.findOne({ _id: messageId, channelId });
+    if (!message || message.isDeleted) {
+      throw new NotFoundError('Message not found');
+    }
+
+    if ((message.pinned === true) === pinned) {
+      return { payload: { ...toPayload(message), type: 'MESSAGE_UPDATED' }, changed: false };
+    }
+
+    if (pinned) {
+      // Dos fijados simultáneos pueden pasar el límite por uno: se acepta, no justifica una transacción.
+      const pinnedCount = await Message.countDocuments({ channelId, pinned: true });
+      if (pinnedCount >= PINNED_LIMIT) {
+        throw new ConflictError(`Pinned messages limit reached (${PINNED_LIMIT})`);
+      }
+    }
+
+    message.pinned = pinned;
+    message.pinnedAt = pinned ? new Date() : null;
+    message.pinnedBy = pinned ? userId : null;
+    await message.save();
+
+    return { payload: { ...toPayload(message), type: 'MESSAGE_UPDATED' }, changed: true };
+  }
+
+  /**
+   * Mensajes fijados de un canal o DM, del fijado más reciente al más viejo.
+   *
+   * @param channelId Canal (o `dm-<id>`)
+   */
+  static async getPinnedMessages(channelId: string): Promise<MessagePayload[]> {
+    const messages = await Message.find({ channelId, pinned: true, isDeleted: { $ne: true } })
+      .sort({ pinnedAt: -1 })
+      .limit(PINNED_LIMIT)
+      .lean<IMessage[]>();
+    return messages.map(toPayload);
   }
 }

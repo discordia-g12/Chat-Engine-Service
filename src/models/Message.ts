@@ -30,6 +30,9 @@ export interface IMessage extends Document {
   isDeleted?: boolean;
   deletedAt?: Date | null;
   reactions?: IReaction[];
+  pinned?: boolean;
+  pinnedAt?: Date | null;
+  pinnedBy?: string | null;
 }
 
 const AttachmentSchema = new Schema({
@@ -105,6 +108,9 @@ const MessageSchema: Schema = new Schema({
   isDeleted: { type: Boolean, default: false },
   deletedAt: { type: Date, default: null },
   reactions: { type: [ReactionSchema], default: undefined },
+  pinned: { type: Boolean, default: false },
+  pinnedAt: { type: Date, default: null },
+  pinnedBy: { type: String, default: null },
 }, {
   strict: true,
 });
@@ -113,6 +119,8 @@ MessageSchema.index({ channelId: 1, createdAt: -1 });
 MessageSchema.index({ channelId: 1, _id: 1 });
 // Métricas del backoffice (`/internal/metrics/messages`): rango de fechas y autores distintos sin collection scan.
 MessageSchema.index({ createdAt: 1, authorId: 1 });
+// Fijados de un canal (`GET /channels/:id/pins`): solo indexa los mensajes fijados.
+MessageSchema.index({ channelId: 1, pinnedAt: -1 }, { partialFilterExpression: { pinned: true } });
 
 export const Message = mongoose.model<IMessage>('Message', MessageSchema);
 
