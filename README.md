@@ -119,7 +119,10 @@ En producción está detrás de Kong, bajo `/api/v1/chat` (Kong saca ese prefijo
 - `POST /conversations/:id/accept` y `POST /conversations/:id/decline`: responden una solicitud de mensaje. Solo
   el destinatario. Aceptar no los hace amigos; rechazar la saca de su lista y a quien la inició no se le avisa.
   Si después escribe quien rechazó, la conversación pasa a `accepted`: escribir es arrepentirse.
-- `POST /presence` con `{ userIds }` (hasta 100): `{ [userId]: "online" | "offline" }`.
+- `POST /presence` con `{ userIds }` (hasta 100): `{ [userId]: "online" | "idle" | "dnd" | "offline" }`. Un
+  usuario conectado figura con el estado que eligió; invisible, suspendido o desconectado, `offline`.
+- `GET /presence/me` y `PUT /presence/me` con `{ status }`: estado elegido por el usuario (`online`, `idle`,
+  `dnd` o `invisible`; `online` si nunca eligió uno). Otro valor es `400`.
 - `GET /inbox/ws`: WebSocket del usuario. Ver abajo.
 - `GET /livez`: el proceso está vivo. No consulta Mongo ni Redis, para que una caída de ellos no reinicie el
   contenedor.
@@ -199,6 +202,8 @@ cliente vuelve a pedir `GET /api/v1/servers` (ADR 0013 de `org-docs`).
 Al reconectar, el cliente vuelve a pedir `GET /conversations`. Mientras el inbox está conectado, la clave Redis
 `presence:<userId>` tiene un TTL de 60 s y la renueva cada pong del heartbeat. Al cerrarse el último socket de esa
 instancia se borra; si el usuario tiene otro en otra instancia, vuelve en el próximo ping.
+El estado elegido va en `presence:pref:<userId>`, sin TTL: se conserva entre sesiones y solo se ve mientras
+existe `presence:<userId>`.
 
 ### Mensajes del servidor por el WebSocket
 
