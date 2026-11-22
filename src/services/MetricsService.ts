@@ -13,9 +13,13 @@ export interface ChannelMetrics extends MessageMetrics {
   daily: DailyChannelMetrics[];
 }
 
+/** Los mensajes del sistema ("se unió …") no cuentan: no los mandó nadie. */
+const SENT_BY_USERS = { systemEvent: { $exists: false } };
+
 /**
  * Métricas de plataforma para el backoffice, consultadas en el momento por Notification-Audit-Metrics.
  * Cuentan mensajes de canales y de DMs (los dos viven en `Message`), borrados incluidos: se enviaron igual.
+ * Los del sistema, no.
  */
 export const MetricsService = {
   /**
@@ -25,7 +29,7 @@ export const MetricsService = {
    */
   async messageMetrics(from: Date, to: Date): Promise<MessageMetrics> {
     const [result] = await Message.aggregate<MessageMetrics>([
-      { $match: { createdAt: { $gte: from, $lt: to } } },
+      { $match: { createdAt: { $gte: from, $lt: to }, ...SENT_BY_USERS } },
       { $group: { _id: '$authorId', count: { $sum: 1 } } },
       { $group: { _id: null, messages: { $sum: '$count' }, activeUsers: { $sum: 1 } } },
       { $project: { _id: 0, messages: 1, activeUsers: 1 } },
@@ -45,7 +49,7 @@ export const MetricsService = {
       totals: MessageMetrics[];
       daily: DailyChannelMetrics[];
     }>([
-      { $match: { channelId: { $in: channelIds }, createdAt: { $gte: from, $lt: to } } },
+      { $match: { channelId: { $in: channelIds }, createdAt: { $gte: from, $lt: to }, ...SENT_BY_USERS } },
       {
         $facet: {
           totals: [

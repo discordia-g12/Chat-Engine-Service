@@ -15,6 +15,10 @@ export interface IReaction {
   emojiId?: string;
 }
 
+/** Mensajes que escribe el sistema, no un usuario. `member_join`: alguien se unió al servidor (autor = quien llegó). */
+export const SYSTEM_EVENTS = ['member_join'] as const;
+export type SystemEvent = (typeof SYSTEM_EVENTS)[number];
+
 export interface IMessage extends Document {
   content: string;
   authorId: string;
@@ -33,6 +37,10 @@ export interface IMessage extends Document {
   pinned?: boolean;
   pinnedAt?: Date | null;
   pinnedBy?: string | null;
+  /** Mensaje del sistema: sin texto, la interfaz lo arma con el evento y el autor. */
+  systemEvent?: SystemEvent;
+  /** Id del evento de RabbitMQ que lo creó (message_id del Outbox): una entrega repetida no lo duplica. */
+  sourceEventId?: string;
 }
 
 const AttachmentSchema = new Schema({
@@ -56,7 +64,7 @@ const MessageSchema: Schema = new Schema({
     required: [
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       function (this: any) {
-        return !this.isDeleted && (!this.attachments || this.attachments.length === 0);
+        return !this.isDeleted && !this.systemEvent && (!this.attachments || this.attachments.length === 0);
       },
       'Content is required',
     ],
@@ -67,7 +75,7 @@ const MessageSchema: Schema = new Schema({
       {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         validator: function (this: any, v: string) {
-          if (this.isDeleted) {
+          if (this.isDeleted || this.systemEvent) {
             return true;
           }
           if (!this.attachments || this.attachments.length === 0) {
@@ -111,6 +119,8 @@ const MessageSchema: Schema = new Schema({
   pinned: { type: Boolean, default: false },
   pinnedAt: { type: Date, default: null },
   pinnedBy: { type: String, default: null },
+  systemEvent: { type: String, enum: SYSTEM_EVENTS, default: undefined },
+  sourceEventId: { type: String, default: undefined },
 }, {
   strict: true,
 });
@@ -121,6 +131,8 @@ MessageSchema.index({ channelId: 1, _id: 1 });
 MessageSchema.index({ createdAt: 1, authorId: 1 });
 // Fijados de un canal (`GET /channels/:id/pins`): solo indexa los mensajes fijados.
 MessageSchema.index({ channelId: 1, pinnedAt: -1 }, { partialFilterExpression: { pinned: true } });
+// Idempotencia de los mensajes del sistema: solo indexa los que vienen de un evento.
+MessageSchema.index({ sourceEventId: 1 }, { unique: true, partialFilterExpression: { sourceEventId: { $type: 'string' } } });
 
 export const Message = mongoose.model<IMessage>('Message', MessageSchema);
 

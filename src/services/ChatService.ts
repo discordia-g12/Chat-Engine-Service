@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import mongoose from 'mongoose';
-import { Message, IMessage } from '../models/Message';
+import { Message, IMessage, SystemEvent } from '../models/Message';
 import { ReadState } from '../models/ReadState';
 import { ChannelAccessResult, PermissionService } from './PermissionService';
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from '../errors';
@@ -53,6 +53,8 @@ export interface MessagePayload {
   pinnedAt?: Date | null;
   pinnedBy?: string | null;
   type?: string;
+  /** Mensaje del sistema (`type: 'system'`): qué pasó y a quién. La interfaz arma el texto con su nombre actual. */
+  system?: { event: SystemEvent; userId: string };
 }
 
 /** Máximo de mensajes fijados por canal o DM. */
@@ -126,6 +128,8 @@ async function findSearchPage(channelIds: string[], search: NormalizedSearch): P
   const query = {
     channelId: channelIds.length === 1 ? channelIds[0] : { $in: channelIds },
     isDeleted: { $ne: true },
+    // "se unió …" no es un mensaje de nadie: no aparece buscando por texto ni por autor
+    systemEvent: { $exists: false },
     ...(search.term ? { content: { $regex: buildContainsPattern(search.term), $options: 'i' } } : {}),
     ...(search.authorId ? { authorId: search.authorId } : {}),
     ...(search.before ? { _id: { $lt: search.before } } : {}),
@@ -177,6 +181,7 @@ function toPayload(msg: IMessage): MessagePayload {
     // Siempre viaja `pinned` (también en false) para que un desfijado pise el estado del cliente.
     pinned: msg.pinned === true && !isDeleted,
     ...(msg.pinned && !isDeleted ? { pinnedAt: msg.pinnedAt ?? null, pinnedBy: msg.pinnedBy ?? null } : {}),
+    ...(msg.systemEvent && !isDeleted ? { type: 'system', system: { event: msg.systemEvent, userId: msg.authorId } } : {}),
     ...(isDeleted ? { type: 'deleted', isDeleted: true, deletedAt: msg.deletedAt ?? null } : {}),
   };
 }
@@ -337,6 +342,28 @@ export class ChatService {
   }
 
   /**
+   * "Se unió …": mensaje del sistema en el canal de bienvenida cuando alguien entra al servidor
+   * (`member.joined` de Server-Roles, que elige el canal). El autor es quien llegó, para que la interfaz
+   * muestre su nombre actual. Idempotente por `sourceEventId`: una entrega repetida del evento devuelve null.
+   */
+  static async postMemberJoined(channelId: string, userId: string, sourceEventId?: string): Promise<MessagePayload | null> {
+    try {
+      const message = await Message.create({
+        content: '',
+        authorId: userId,
+        channelId,
+        systemEvent: 'member_join',
+        ...(sourceEventId ? { sourceEventId } : {}),
+      });
+      return toPayload(message.toObject<IMessage>());
+    } catch (err) {
+      // E11000: ya se publicó por este mismo evento
+      if ((err as { code?: unknown })?.code === 11000) return null;
+      throw err;
+    }
+  }
+
+  /**
    * Elimina todos los mensajes y estados de lectura de un canal de forma permanente.
    */
   static async deleteChannelMessages(channelId: string): Promise<number> {
@@ -383,6 +410,11 @@ export class ChatService {
 
     if (message.isDeleted) {
       throw new ValidationError('Cannot edit a deleted message');
+    }
+
+    // "Se unió …" tiene como autor a quien llegó, pero no lo escribió
+    if (message.systemEvent) {
+      throw new ValidationError('System messages cannot be edited');
     }
 
     if (message.authorId !== authorId) {
@@ -648,6 +680,10 @@ export class ChatService {
     const message = await Message.findOne({ _id: messageId, channelId });
     if (!message || message.isDeleted) {
       throw new NotFoundError('Message not found');
+    }
+
+    if (message.systemEvent) {
+      throw new ValidationError('System messages cannot be pinned');
     }
 
     if ((message.pinned === true) === pinned) {
