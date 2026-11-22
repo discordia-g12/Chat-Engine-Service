@@ -1,5 +1,6 @@
 import { getRedis } from '../config/redis';
 import { UpstreamUnavailableError } from '../errors';
+import { PubSubService } from './PubSubService';
 import { RelationsService } from './RelationsService';
 
 const PRESENCE_TTL_SECONDS = 60;
@@ -14,12 +15,25 @@ export const PREFERRED_STATUSES: readonly PreferredStatus[] = ['online', 'idle',
 
 const DEFAULT_PREFERENCE: PreferredStatus = 'online';
 
+/** Valor de la clave de conexión: conectado y activo, o conectado sin actividad (todas sus pestañas). */
+const ACTIVE = '1';
+const INACTIVE = 'idle';
+
 /** Lo que usa de Redis, para poder simularlo en los tests. */
 export interface PresenceRedis {
   set(key: string, value: string): Promise<unknown>;
-  set(key: string, value: string, mode: 'EX', seconds: number): Promise<unknown>;
-  del(key: string): Promise<unknown>;
+  /** Con GET (Redis 6.2+): devuelve el valor anterior, para avisar solo cuando cambia. */
+  set(key: string, value: string, mode: 'EX', seconds: number, get: 'GET'): Promise<string | null>;
+  del(key: string): Promise<number>;
   mget(keys: string[]): Promise<(string | null)[]>;
+}
+
+/** Un id tal como lo pidió el cliente y el usuario real detrás (null si no existe). */
+export interface ResolvedUser {
+  id: string;
+  canonicalId: string;
+  exists: boolean;
+  suspended: boolean;
 }
 
 const presenceKey = (userId: string) => `presence:${userId}`;
@@ -31,9 +45,13 @@ export const isPreferredStatus = (value: unknown): value is PreferredStatus =>
 const toPreference = (value: string | null | undefined): PreferredStatus =>
   isPreferredStatus(value) ? value : DEFAULT_PREFERENCE;
 
-/** Conectado + preferencia → lo que ven los demás. */
-const visibleStatus = (connected: boolean, preference: PreferredStatus): PresenceStatus => {
-  if (!connected || preference === 'invisible') return 'offline';
+/**
+ * Conexión + preferencia → lo que ven los demás. Sin actividad pasa a `idle` solo quien eligió `online`:
+ * No molestar e Invisible se respetan aunque no esté frente a la pantalla.
+ */
+const visibleStatus = (connection: string | null | undefined, preference: PreferredStatus): PresenceStatus => {
+  if (!connection || preference === 'invisible') return 'offline';
+  if (preference === 'online' && connection === INACTIVE) return 'idle';
   return preference;
 };
 
@@ -49,9 +67,16 @@ export class PresenceService {
     return this.client ?? getRedis();
   }
 
-  /** Marca al usuario conectado. La renueva el heartbeat del inbox: si el socket muere, la clave vence sola. */
-  static async touch(userId: string): Promise<void> {
-    await this.redis().set(presenceKey(userId), '1', 'EX', PRESENCE_TTL_SECONDS);
+  /**
+   * Marca al usuario conectado. La renueva el heartbeat del inbox: si el socket muere, la clave vence sola.
+   * Si cambió algo (recién se conecta, o pasó de activo a inactivo o al revés), avisa a quienes lo siguen.
+   *
+   * @param inactive todas sus pestañas en esta instancia están sin actividad
+   */
+  static async touch(userId: string, inactive = false): Promise<void> {
+    const value = inactive ? INACTIVE : ACTIVE;
+    const previous = await this.redis().set(presenceKey(userId), value, 'EX', PRESENCE_TTL_SECONDS, 'GET');
+    if (previous !== value) await this.publishChange(userId);
   }
 
   /**
@@ -59,7 +84,8 @@ export class PresenceService {
    * su heartbeat vuelve a crear la clave en el próximo ping. La preferencia no se toca.
    */
   static async clear(userId: string): Promise<void> {
-    await this.redis().del(presenceKey(userId));
+    const deleted = await this.redis().del(presenceKey(userId));
+    if (deleted > 0) await this.publishChange(userId);
   }
 
   /**
@@ -77,7 +103,8 @@ export class PresenceService {
   }
 
   /**
-   * Guarda el estado elegido. Sin TTL: se conserva aunque el usuario se desconecte.
+   * Guarda el estado elegido. Sin TTL: se conserva aunque el usuario se desconecte. No avisa a nadie: eso es
+   * announcePreference, aparte para que un aviso que falla no haga fallar algo que ya se guardó.
    *
    * @throws UpstreamUnavailableError si Redis no responde
    */
@@ -89,33 +116,78 @@ export class PresenceService {
     }
   }
 
+  /** Avisa el estado elegido a quienes siguen al usuario y a sus otras sesiones (MY_STATUS). */
+  static async announcePreference(userId: string, status: PreferredStatus): Promise<void> {
+    await Promise.all([
+      this.publishChange(userId),
+      PubSubService.publishToInbox(userId, { type: 'MY_STATUS', status }),
+    ]);
+  }
+
   /**
-   * Estado de cada usuario, con los ids tal como los pidió el cliente: la clave está por id canónico, pero
-   * en los canales de servidor un autor puede figurar con un alias. Conectado vale su preferencia;
-   * invisible, suspendido o sin conexión, `offline`.
+   * Usuario real detrás de cada id: la clave está por id canónico, pero en los canales de servidor un autor
+   * puede figurar con un alias.
    *
-   * @throws UpstreamUnavailableError si Auth o Redis no responden
+   * @throws UpstreamUnavailableError si Auth no responde
    */
-  static async getStatuses(userIds: string[]): Promise<Record<string, PresenceStatus>> {
-    if (userIds.length === 0) return {};
-    const users = await Promise.all(
-      userIds.map(async (id) => ({ id, canonical: await RelationsService.getCanonical(id) }))
+  static async resolve(userIds: string[]): Promise<ResolvedUser[]> {
+    return Promise.all(
+      userIds.map(async (id) => {
+        const canonical = await RelationsService.getCanonical(id);
+        return {
+          id,
+          canonicalId: canonical?.userId ?? id,
+          exists: canonical !== null,
+          suspended: canonical?.suspended ?? false,
+        };
+      })
     );
-    const canonicalIds = users.map(({ id, canonical }) => canonical?.userId ?? id);
+  }
+
+  /**
+   * Estado de usuarios ya resueltos, con los ids tal como los pidió el cliente. Desconectado, invisible,
+   * suspendido o inexistente: `offline`.
+   *
+   * @throws UpstreamUnavailableError si Redis no responde
+   */
+  static async statusesOf(users: ResolvedUser[]): Promise<Record<string, PresenceStatus>> {
+    if (users.length === 0) return {};
+    const ids = users.map((user) => user.canonicalId);
 
     // Una sola ida a Redis: primero las claves de conexión, después las de preferencia
     let values: (string | null)[];
     try {
-      values = await this.redis().mget([...canonicalIds.map(presenceKey), ...canonicalIds.map(preferenceKey)]);
+      values = await this.redis().mget([...ids.map(presenceKey), ...ids.map(preferenceKey)]);
     } catch (cause) {
       throw new UpstreamUnavailableError('Failed to read presence', { cause });
     }
 
     return Object.fromEntries(
-      users.map(({ id, canonical }, i) => {
-        const connected = Boolean(canonical && !canonical.suspended && values.at(i));
-        return [id, visibleStatus(connected, toPreference(values.at(users.length + i)))];
+      users.map((user, i) => {
+        const connection = user.exists && !user.suspended ? values.at(i) : null;
+        return [user.id, visibleStatus(connection, toPreference(values.at(users.length + i)))];
       })
     );
+  }
+
+  /**
+   * Estado de cada usuario, con los ids tal como los pidió el cliente.
+   *
+   * @throws UpstreamUnavailableError si Auth o Redis no responden
+   */
+  static async getStatuses(userIds: string[]): Promise<Record<string, PresenceStatus>> {
+    if (userIds.length === 0) return {};
+    return this.statusesOf(await this.resolve(userIds));
+  }
+
+  /**
+   * Publica el estado actual del usuario para quienes lo siguen (en cualquier instancia). `userId` ya es el
+   * canónico: lo llaman el inbox y /presence/me, que pasan por canonicalUserGuard.
+   */
+  private static async publishChange(userId: string): Promise<void> {
+    const [status] = Object.values(
+      await this.statusesOf([{ id: userId, canonicalId: userId, exists: true, suspended: false }])
+    );
+    await PubSubService.publishPresence({ userId, status });
   }
 }

@@ -1,7 +1,7 @@
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert';
 import { EventEmitter } from 'node:events';
-import { PubSubService, type PubSubLogger } from '../src/services/PubSubService';
+import { PRESENCE_CHANNEL, PubSubService, type PubSubLogger } from '../src/services/PubSubService';
 import { SessionManager } from '../src/services/SessionManager';
 import { getRedis, getSubscriberRedis, disconnectRedis } from '../src/config/redis';
 import type { WebSocket } from 'ws';
@@ -186,7 +186,8 @@ describe('PubSubService and Multi-Node Redis Pub/Sub', () => {
     });
     await flushAsync();
 
-    assert.strictEqual(fakeSubscriber.subscribedChannels.size, 1);
+    // Una sola suscripción al canal, más la de presencia (que es de la instancia, no de un socket)
+    assert.deepStrictEqual(Array.from(fakeSubscriber.subscribedChannels).sort(), ['channel:chan-1', PRESENCE_CHANNEL]);
 
     // Unregister ws1: chan-1 still has ws2, so remains subscribed
     SessionManager.unregister(ws1);
@@ -456,12 +457,12 @@ describe('PubSubService and Multi-Node Redis Pub/Sub', () => {
     });
     await flushAsync();
 
-    // Subscribe error was logged
-    assert.strictEqual(errorCount, 1);
+    // Subscribe errors were logged: the presence channel (on start) and the socket's channel
+    assert.strictEqual(errorCount, 2);
 
     // When publish fails, it logs error and falls back to local broadcast
     await PubSubService.publish('chan-err', { content: 'Fallback on error' });
-    assert.strictEqual(errorCount, 2);
+    assert.strictEqual(errorCount, 3);
 
     const received = (ws as unknown as { _sentMessages: string[] })._sentMessages;
     assert.strictEqual(received.length, 1);
@@ -470,7 +471,7 @@ describe('PubSubService and Multi-Node Redis Pub/Sub', () => {
     // When unsubscribe is called for a channel that failed to subscribe, it cleanly returns early
     SessionManager.unregister(ws);
     await flushAsync();
-    assert.strictEqual(errorCount, 2);
+    assert.strictEqual(errorCount, 3);
 
     // Now test unsubscribe error when unregistering a previously subscribed channel
     fakeSubscriber.failSubscribe = false;
@@ -488,7 +489,62 @@ describe('PubSubService and Multi-Node Redis Pub/Sub', () => {
 
     SessionManager.unregister(ws2);
     await flushAsync();
-    assert.strictEqual(errorCount, 3);
+    assert.strictEqual(errorCount, 4);
+  });
+
+  describe('presence channel', () => {
+    afterEach(() => PubSubService.setPresenceHandler(null));
+
+    it('each instance subscribes on start and hands what arrives to the presence handler', async () => {
+      const delivered: string[] = [];
+      PubSubService.setPresenceHandler((raw) => delivered.push(raw));
+      await PubSubService.start({
+        publisher: fakePublisher as unknown as Redis,
+        subscriber: fakeSubscriber as unknown as Redis,
+        logger: silentLogger,
+      });
+      assert.ok(fakeSubscriber.subscribedChannels.has(PRESENCE_CHANNEL));
+
+      fakeSubscriber.emit('message', PRESENCE_CHANNEL, '{"userId":"bob","status":"idle"}');
+      assert.deepStrictEqual(delivered, ['{"userId":"bob","status":"idle"}']);
+
+      await PubSubService.stop();
+      assert.ok(fakeSubscriber.unsubscribedChannels.includes(PRESENCE_CHANNEL));
+    });
+
+    it('publishes changes to Redis, and locally when Redis fails or is not started', async () => {
+      const delivered: string[] = [];
+      PubSubService.setPresenceHandler((raw) => delivered.push(raw));
+
+      await PubSubService.publishPresence({ userId: 'bob', status: 'online' });
+      assert.deepStrictEqual(delivered, ['{"userId":"bob","status":"online"}']);
+
+      await PubSubService.start({
+        publisher: fakePublisher as unknown as Redis,
+        subscriber: fakeSubscriber as unknown as Redis,
+        logger: silentLogger,
+      });
+      await PubSubService.publishPresence({ userId: 'bob', status: 'dnd' });
+      assert.deepStrictEqual(fakePublisher.published, [{ channel: PRESENCE_CHANNEL, message: '{"userId":"bob","status":"dnd"}' }]);
+      assert.strictEqual(delivered.length, 1);
+
+      fakePublisher.failPublish = true;
+      await PubSubService.publishPresence({ userId: 'bob', status: 'offline' });
+      assert.deepStrictEqual(delivered.at(-1), '{"userId":"bob","status":"offline"}');
+    });
+
+    it('a failed unsubscribe on stop is only logged', async () => {
+      let errors = 0;
+      await PubSubService.start({
+        publisher: fakePublisher as unknown as Redis,
+        subscriber: fakeSubscriber as unknown as Redis,
+        logger: { ...silentLogger, error: () => void errors++ },
+      });
+      fakeSubscriber.failUnsubscribe = true;
+
+      await PubSubService.stop();
+      assert.strictEqual(errors, 1);
+    });
   });
 
   it('handles unsubscribeAll when stop is called with active subscriptions', async () => {

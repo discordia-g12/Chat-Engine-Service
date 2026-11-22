@@ -8,6 +8,8 @@ export interface ClientSession {
   socket: WebSocket;
   canSend: boolean;
   connectedAt: Date;
+  /** Solo inbox: el cliente avisó que no hay actividad (ACTIVITY). */
+  inactive?: boolean;
 }
 
 export class SessionManager {

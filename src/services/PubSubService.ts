@@ -20,6 +20,9 @@ export interface PubSubOptions {
 
 const REDIS_CHANNEL_PREFIX = 'channel:';
 
+/** Cambios de presencia de todos los usuarios: cada instancia se queda con los de quienes siguen sus sockets. */
+export const PRESENCE_CHANNEL = 'presence-updates';
+
 export class PubSubService {
   private static publisher: Redis | null = null;
   private static subscriber: Redis | null = null;
@@ -27,6 +30,12 @@ export class PubSubService {
   private static started = false;
   private static subscribedChannels = new Set<string>();
   private static messageHandler: ((channel: string, message: string) => void) | null = null;
+  private static presenceHandler: ((rawChange: string) => void) | null = null;
+
+  /** Quién recibe los cambios de presencia (PresenceHub.deliver). Se pasa así para no importarlo acá. */
+  static setPresenceHandler(handler: ((rawChange: string) => void) | null): void {
+    this.presenceHandler = handler;
+  }
 
   /** Los inbox pasan por acá como un canal más, con su propia clave (`inbox:<userId>`). */
   static channelKey(channelId: string): string {
@@ -89,6 +98,13 @@ export class PubSubService {
 
     this.started = true;
 
+    try {
+      await this.subscriber.subscribe(PRESENCE_CHANNEL);
+    } catch (err) {
+      // Sin esto la presencia sigue andando por polling; solo no llega al instante
+      this.logger.error({ err }, 'Failed to subscribe to presence updates');
+    }
+
     // Resubscribe any channels that already have active sockets
     const activeChannels = SessionManager.getActiveChannelIds();
     for (const channelId of activeChannels) {
@@ -108,6 +124,9 @@ export class PubSubService {
     if (this.subscriber && this.messageHandler) {
       this.subscriber.removeListener('message', this.messageHandler);
     }
+    await this.subscriber?.unsubscribe(PRESENCE_CHANNEL).catch((err: unknown) => {
+      this.logger.error({ err }, 'Failed to unsubscribe from presence updates');
+    });
 
     await this.unsubscribeAll();
 
@@ -194,7 +213,29 @@ export class PubSubService {
     await this.publish(inboxChannelId(userId), payload);
   }
 
+  /** Publica un cambio de presencia para todas las instancias. Sin Redis, solo le llega a esta. */
+  static async publishPresence(change: unknown): Promise<void> {
+    const rawChange = JSON.stringify(change);
+
+    if (!this.started || !this.publisher) {
+      this.presenceHandler?.(rawChange);
+      return;
+    }
+
+    try {
+      await this.publisher.publish(PRESENCE_CHANNEL, rawChange);
+    } catch (err) {
+      this.logger.error({ err }, 'Failed to publish presence change to Redis, delivering locally');
+      this.presenceHandler?.(rawChange);
+    }
+  }
+
   private static handleIncomingMessage(channel: string, message: string): void {
+    if (channel === PRESENCE_CHANNEL) {
+      this.presenceHandler?.(message);
+      return;
+    }
+
     const channelId = this.channelIdFromKey(channel);
     if (!channelId) {
       return;

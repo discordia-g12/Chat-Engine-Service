@@ -12,6 +12,7 @@ import { EventConsumer } from '../src/services/EventConsumer';
 import { RelationsService } from '../src/services/RelationsService';
 import { StorageService } from '../src/services/StorageService';
 import { PresenceService } from '../src/services/PresenceService';
+import { PresenceHub } from '../src/services/PresenceHub';
 import { PubSubService } from '../src/services/PubSubService';
 import { SessionManager } from '../src/services/SessionManager';
 import { UNREAD_COUNT_CAP } from '../src/services/ReadStateService';
@@ -32,17 +33,21 @@ class FakePresenceRedis {
   failReads = false;
   failWrites = false;
 
-  async set(key: string, value: string, _mode?: 'EX', seconds?: number) {
+  async set(key: string, value: string, _mode?: 'EX', seconds?: number, get?: 'GET') {
     if (this.failWrites) throw new Error('redis down');
-    // La conexión vence a los 60 s; la preferencia no vence
-    assert.strictEqual(seconds, key.startsWith('presence:pref:') ? undefined : 60);
+    // La conexión vence a los 60 s y pide el valor anterior; la preferencia no vence
+    const isPreference = key.startsWith('presence:pref:');
+    assert.strictEqual(seconds, isPreference ? undefined : 60);
+    assert.strictEqual(get, isPreference ? undefined : 'GET');
+    const previous = this.keys.get(key) ?? null;
     this.keys.set(key, value);
     this.sets.push(key);
+    return previous;
   }
 
   async del(key: string) {
     if (this.failWrites) throw new Error('redis down');
-    this.keys.delete(key);
+    return this.keys.delete(key) ? 1 : 0;
   }
 
   async mget(keys: string[]) {
@@ -1098,6 +1103,148 @@ describe('Direct messages', () => {
 
         redis.failWrites = true;
         assert.strictEqual((await setMine('bob', 'idle')).statusCode, 503);
+      });
+    });
+
+    describe('realtime', () => {
+      const setMine = (userId: string, status: string) => request(userId, 'PUT', '/presence/me', { status });
+      const updates = (received: Json[]) => received.filter((event) => event.type === 'PRESENCE_UPDATE');
+      const lastUpdate = (received: Json[]) => updates(received).at(-1);
+
+      /** Inbox de quien mira, ya suscripto (llegó el snapshot). */
+      const watcher = async (userId: string, watched: string[]) => {
+        const inbox = await connect('/inbox/ws', userId);
+        inbox.ws.send(JSON.stringify({ type: 'PRESENCE_SUBSCRIBE', userIds: watched }));
+        await waitFor(() => inbox.received.some((event) => event.type === 'PRESENCE_SNAPSHOT'), 'the snapshot');
+        return inbox;
+      };
+
+      it('subscribing answers with the current state', async () => {
+        await setMine('carol', 'dnd');
+        await connect('/inbox/ws', 'bob');
+        await connect('/inbox/ws', 'carol');
+        await waitFor(() => redis.keys.has('presence:bob') && redis.keys.has('presence:carol'), 'the presence keys');
+
+        const alice = await watcher('alice', ['bob', 'carol', 'dave', 'bob']);
+
+        const snapshot = alice.received.find((event) => event.type === 'PRESENCE_SNAPSHOT');
+        assert.deepStrictEqual(snapshot, { type: 'PRESENCE_SNAPSHOT', statuses: { bob: 'online', carol: 'dnd', dave: 'offline' } });
+      });
+
+      it('connecting and leaving reach the watchers, once', async () => {
+        const alice = await watcher('alice', ['bob']);
+
+        const bob = await connect('/inbox/ws', 'bob');
+        await waitFor(() => lastUpdate(alice.received)?.status === 'online', 'bob online');
+        // Las renovaciones del heartbeat no cambian nada: no se vuelve a avisar
+        await waitFor(() => redis.sets.filter((key) => key === 'presence:bob').length >= 3, 'presence renewals');
+        assert.strictEqual(updates(alice.received).length, 1);
+
+        bob.ws.close();
+        await waitFor(() => lastUpdate(alice.received)?.status === 'offline', 'bob offline');
+        assert.deepStrictEqual(lastUpdate(alice.received), { type: 'PRESENCE_UPDATE', userId: 'bob', status: 'offline' });
+      });
+
+      it('a chosen status reaches the watchers and the other sessions of its owner', async () => {
+        const alice = await watcher('alice', ['bob']);
+        const bob = await connect('/inbox/ws', 'bob');
+        await waitFor(() => lastUpdate(alice.received)?.status === 'online', 'bob online');
+
+        await setMine('bob', 'dnd');
+        await waitFor(() => lastUpdate(alice.received)?.status === 'dnd', 'bob dnd');
+        await waitFor(() => bob.received.some((event) => event.type === 'MY_STATUS'), 'MY_STATUS');
+        assert.deepStrictEqual(bob.received.find((event) => event.type === 'MY_STATUS'), { type: 'MY_STATUS', status: 'dnd' });
+
+        await setMine('bob', 'invisible');
+        await waitFor(() => lastUpdate(alice.received)?.status === 'offline', 'bob invisible');
+      });
+
+      it('without activity in every tab looks idle, and back to online with activity', async () => {
+        const alice = await watcher('alice', ['bob']);
+        const tab1 = await connect('/inbox/ws', 'bob');
+        const tab2 = await connect('/inbox/ws', 'bob');
+        await waitFor(() => lastUpdate(alice.received)?.status === 'online', 'bob online');
+
+        // Una pestaña sin actividad no alcanza
+        tab1.ws.send(JSON.stringify({ type: 'ACTIVITY', idle: true }));
+        const inactiveTabs = () =>
+          SessionManager.getChannelSockets('inbox:bob').filter((socket) => SessionManager.getSession(socket)?.inactive).length;
+        await waitFor(() => inactiveTabs() === 1, 'tab1 inactive');
+        assert.strictEqual((await presence('alice', ['bob'])).json().bob, 'online');
+
+        // Se cierra la activa: queda solo la inactiva
+        tab2.ws.close();
+        await waitFor(() => lastUpdate(alice.received)?.status === 'idle', 'bob idle');
+        assert.strictEqual(redis.keys.get('presence:bob'), 'idle');
+
+        tab1.ws.send(JSON.stringify({ type: 'ACTIVITY', idle: false }));
+        await waitFor(() => lastUpdate(alice.received)?.status === 'online', 'bob back online');
+      });
+
+      it('without activity, No molestar and Invisible stay as chosen', async () => {
+        await setMine('bob', 'dnd');
+        const alice = await watcher('alice', ['bob']);
+        const bob = await connect('/inbox/ws', 'bob');
+        await waitFor(() => lastUpdate(alice.received)?.status === 'dnd', 'bob dnd');
+
+        bob.ws.send(JSON.stringify({ type: 'ACTIVITY', idle: true }));
+        await waitFor(() => redis.keys.get('presence:bob') === 'idle', 'bob inactive');
+        assert.strictEqual((await presence('alice', ['bob'])).json().bob, 'dnd');
+        assert.strictEqual(lastUpdate(alice.received)?.status, 'dnd');
+      });
+
+      it('answers with the ids as they were asked for (aliases)', async () => {
+        const bob = await watcher('bob', ['google|alice']);
+
+        await connect('/inbox/ws', 'alice');
+
+        await waitFor(() => updates(bob.received).length > 0, 'the update');
+        assert.deepStrictEqual(lastUpdate(bob.received), { type: 'PRESENCE_UPDATE', userId: 'google|alice', status: 'online' });
+      });
+
+      it('a new subscription replaces the previous one, and closing drops it', async () => {
+        const alice = await watcher('alice', ['bob']);
+        alice.received.length = 0;
+        alice.ws.send(JSON.stringify({ type: 'PRESENCE_SUBSCRIBE', userIds: ['carol'] }));
+        await waitFor(() => alice.received.some((event) => event.type === 'PRESENCE_SNAPSHOT'), 'the new snapshot');
+        assert.strictEqual(PresenceHub.watcherCount('bob'), 0);
+
+        await connect('/inbox/ws', 'bob');
+        await connect('/inbox/ws', 'carol');
+        await waitFor(() => updates(alice.received).length > 0, 'carol online');
+        assert.deepStrictEqual(updates(alice.received).map((event) => event.userId), ['carol']);
+
+        alice.ws.close();
+        await waitFor(() => PresenceHub.watcherCount('carol') === 0, 'the subscription to go away');
+      });
+
+      it('ignores malformed messages and keeps the socket open', async () => {
+        const alice = await connect('/inbox/ws', 'alice');
+        for (const message of [
+          'not json',
+          JSON.stringify(null),
+          JSON.stringify({ type: 'PRESENCE_SUBSCRIBE', userIds: 'bob' }),
+          JSON.stringify({ type: 'PRESENCE_SUBSCRIBE', userIds: [1] }),
+          JSON.stringify({ type: 'PRESENCE_SUBSCRIBE', userIds: Array(501).fill('bob') }),
+          JSON.stringify({ type: 'ACTIVITY', idle: 'yes' }),
+          JSON.stringify({ type: 'SEND', content: 'hola' }),
+        ]) {
+          alice.ws.send(message);
+        }
+        await new Promise((r) => setTimeout(r, 50));
+
+        assert.strictEqual(alice.ws.readyState, WebSocket.OPEN);
+        assert.deepStrictEqual(alice.received, []);
+        assert.strictEqual(PresenceHub.watcherCount('bob'), 0);
+      });
+
+      it('a Redis failure while saving the choice is a 503 and nobody is told', async () => {
+        const alice = await watcher('alice', ['bob']);
+        redis.failWrites = true;
+
+        assert.strictEqual((await setMine('bob', 'dnd')).statusCode, 503);
+        await new Promise((r) => setTimeout(r, 30));
+        assert.deepStrictEqual(updates(alice.received), []);
       });
     });
 

@@ -68,6 +68,9 @@ export default async function conversationsPlugin(app: FastifyInstance) {
         throw new ValidationError(`status must be one of: ${PREFERRED_STATUSES.join(', ')}`);
       }
       await PresenceService.setPreference(req.userId, status);
+      PresenceService.announcePreference(req.userId, status).catch((err) =>
+        req.log.warn({ err, userId: req.userId }, 'Failed to announce presence')
+      );
       return { status };
     });
   });
