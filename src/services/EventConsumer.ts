@@ -470,7 +470,8 @@ export class EventConsumer {
         if (!msg) return;
         try {
           const payload = JSON.parse(msg.content.toString());
-          this.handleEvent(msg.fields.routingKey, payload, { messageId: msg.properties.messageId }).catch((err) =>
+          // Sin message_id (otro publicador) el evento vale igual: solo no se puede deduplicar
+          this.handleEvent(msg.fields.routingKey, payload, { messageId: msg.properties?.messageId }).catch((err) =>
             opts.logger.error({ err, routingKey: msg.fields.routingKey }, 'Failed to handle event')
           );
           channel.ack(msg);
