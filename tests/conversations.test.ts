@@ -32,9 +32,10 @@ class FakePresenceRedis {
   failReads = false;
   failWrites = false;
 
-  async set(key: string, value: string, _mode: 'EX', seconds: number) {
+  async set(key: string, value: string, _mode?: 'EX', seconds?: number) {
     if (this.failWrites) throw new Error('redis down');
-    assert.strictEqual(seconds, 60);
+    // La conexión vence a los 60 s; la preferencia no vence
+    assert.strictEqual(seconds, key.startsWith('presence:pref:') ? undefined : 60);
     this.keys.set(key, value);
     this.sets.push(key);
   }
@@ -1008,6 +1009,96 @@ describe('Direct messages', () => {
       assert.strictEqual((await presence('alice', [1])).statusCode, 400);
       assert.strictEqual((await presence('alice', Array(101).fill('bob'))).statusCode, 400);
       assert.strictEqual((await presence('alice', Array(100).fill('bob'))).statusCode, 200);
+    });
+
+    describe('chosen status', () => {
+      const getMine = (userId: string) => request(userId, 'GET', '/presence/me');
+      const setMine = (userId: string, status: unknown) => request(userId, 'PUT', '/presence/me', { status });
+
+      it('defaults to online', async () => {
+        const res = await getMine('bob');
+        assert.strictEqual(res.statusCode, 200);
+        assert.deepStrictEqual(res.json(), { status: 'online' });
+      });
+
+      it('is saved and returned', async () => {
+        const res = await setMine('bob', 'dnd');
+        assert.strictEqual(res.statusCode, 200);
+        assert.deepStrictEqual(res.json(), { status: 'dnd' });
+        assert.strictEqual(redis.keys.get('presence:pref:bob'), 'dnd');
+        assert.deepStrictEqual((await getMine('bob')).json(), { status: 'dnd' });
+      });
+
+      it('others see it while connected', async () => {
+        await setMine('bob', 'idle');
+        await setMine('carol', 'dnd');
+        await connect('/inbox/ws', 'bob');
+        await connect('/inbox/ws', 'carol');
+        await waitFor(() => redis.keys.has('presence:bob') && redis.keys.has('presence:carol'), 'the presence keys');
+
+        assert.deepStrictEqual((await presence('alice', ['bob', 'carol'])).json(), { bob: 'idle', carol: 'dnd' });
+      });
+
+      it('invisible looks offline while connected', async () => {
+        await setMine('bob', 'invisible');
+        await connect('/inbox/ws', 'bob');
+        await waitFor(() => redis.keys.has('presence:bob'), 'the presence key');
+
+        assert.strictEqual((await presence('alice', ['bob'])).json().bob, 'offline');
+        assert.deepStrictEqual((await getMine('bob')).json(), { status: 'invisible' });
+      });
+
+      it('disconnected is offline whatever the choice, and the choice survives it', async () => {
+        await setMine('bob', 'idle');
+        const inbox = await connect('/inbox/ws', 'bob');
+        await waitFor(() => redis.keys.has('presence:bob'), 'the presence key');
+
+        inbox.ws.close();
+        await waitFor(() => !redis.keys.has('presence:bob'), 'the presence key to go away');
+        assert.strictEqual((await presence('alice', ['bob'])).json().bob, 'offline');
+        assert.deepStrictEqual((await getMine('bob')).json(), { status: 'idle' });
+      });
+
+      it('resolves aliases for the owner and the readers', async () => {
+        await setMine('google|alice', 'dnd');
+        assert.strictEqual(redis.keys.get('presence:pref:alice'), 'dnd');
+
+        await connect('/inbox/ws', 'alice');
+        await waitFor(() => redis.keys.has('presence:alice'), 'the presence key');
+        assert.deepStrictEqual((await presence('bob', ['google|alice'])).json(), { 'google|alice': 'dnd' });
+      });
+
+      it('a suspended user is offline whatever the choice', async () => {
+        redis.keys.set('presence:dave', '1');
+        redis.keys.set('presence:pref:dave', 'online');
+        suspended.add('dave');
+
+        assert.strictEqual((await presence('alice', ['dave'])).json().dave, 'offline');
+      });
+
+      it('an unknown stored value counts as online', async () => {
+        redis.keys.set('presence:bob', '1');
+        redis.keys.set('presence:pref:bob', 'busy');
+
+        assert.strictEqual((await presence('alice', ['bob'])).json().bob, 'online');
+        assert.deepStrictEqual((await getMine('bob')).json(), { status: 'online' });
+      });
+
+      it('validates the status', async () => {
+        for (const status of [undefined, '', 'offline', 'busy', 1, null]) {
+          assert.strictEqual((await setMine('bob', status)).statusCode, 400, String(status));
+        }
+        assert.strictEqual(redis.keys.has('presence:pref:bob'), false);
+        assert.strictEqual((await request('bob', 'PUT', '/presence/me')).statusCode, 400);
+      });
+
+      it('a Redis failure is a 503', async () => {
+        redis.failReads = true;
+        assert.strictEqual((await getMine('bob')).statusCode, 503);
+
+        redis.failWrites = true;
+        assert.strictEqual((await setMine('bob', 'idle')).statusCode, 503);
+      });
     });
 
     it('a Redis failure is a 503 for readers and does not close the inbox', async () => {
