@@ -246,6 +246,12 @@ Cola `chat_engine_events`, enlazada a `member.*`, `role.*`, `server.deleted`, `s
   la bandeja no son del servidor y siguen abiertos;
 - `user.suspended`: cierra con `4010` todas las sesiones de la cuenta (canales, DMs y bandeja) de cada una
   de sus identidades (`identities`, la principal y sus alias federados);
+- `member.joined`: guarda y emite en vivo un mensaje del sistema en el canal de bienvenida que eligió
+  Server-Roles (`channel_id`; si viene `null`, nada). Llega como un mensaje más del canal, con
+  `type: "system"`, `system: { event: "member_join", userId }`, `content` vacío y quien se unió como
+  `authorId`: la interfaz arma "se unió …" con su nombre actual. No se puede editar ni fijar, se puede
+  reaccionar ("saludalo") y no cuenta en las métricas ni aparece en la búsqueda. El `message_id` del evento
+  queda en el mensaje (índice único), así una entrega repetida no lo duplica;
 - `member.banned`, `member.kicked` y `member.left`: cierra las sesiones de ese usuario en ese servidor;
 - `member.muted` y `member.unmuted`: bloquea o habilita la escritura, y programa el fin del silencio;
 - `member.role_assigned`, `member.role_removed`, `role.permissions_updated` y `role.deleted`: vuelve a

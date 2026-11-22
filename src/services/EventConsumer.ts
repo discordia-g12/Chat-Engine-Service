@@ -193,7 +193,11 @@ export class EventConsumer {
     await Promise.all(userIds.map((userId) => PubSubService.publishToInbox(userId, event)));
   }
 
-  static async handleEvent(routingKey: string, payload: EventPayload): Promise<void> {
+  /**
+   * @param meta.messageId id del evento en RabbitMQ (el del Outbox): lo que crea algo (el aviso de
+   *   `member.joined`) lo usa para no duplicarlo si el evento llega dos veces
+   */
+  static async handleEvent(routingKey: string, payload: EventPayload, meta: { messageId?: string } = {}): Promise<void> {
     if (!payload) {
       return;
     }
@@ -289,6 +293,15 @@ export class EventConsumer {
     }
 
     switch (routingKey) {
+      case 'member.joined': {
+        // Server-Roles elige el canal de bienvenida (el primero que ve @everyone); sin canal, no hay aviso
+        const channelId = typeof payload.channel_id === 'string' ? payload.channel_id : undefined;
+        if (!channelId) break;
+        const joined = await ChatService.postMemberJoined(channelId, userId, meta.messageId);
+        if (joined) await PubSubService.publish(channelId, joined);
+        break;
+      }
+
       case 'member.banned':
         SessionManager.disconnectUser(userId, payload.reason || 'Banned from server', 4003, undefined, serverId);
         break;
@@ -457,7 +470,8 @@ export class EventConsumer {
         if (!msg) return;
         try {
           const payload = JSON.parse(msg.content.toString());
-          this.handleEvent(msg.fields.routingKey, payload).catch((err) =>
+          // Sin message_id (otro publicador) el evento vale igual: solo no se puede deduplicar
+          this.handleEvent(msg.fields.routingKey, payload, { messageId: msg.properties?.messageId }).catch((err) =>
             opts.logger.error({ err, routingKey: msg.fields.routingKey }, 'Failed to handle event')
           );
           channel.ack(msg);
