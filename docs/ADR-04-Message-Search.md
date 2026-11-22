@@ -32,7 +32,14 @@ Restricciones que condicionan el diseño:
   tener entre 1 y 100 caracteres.
 * **Autor:** `authorId` es el id de usuario (el `X-User-Id`, sub de Auth0), el mismo que trae cada mensaje.
   La web lo elige de la lista de miembros del servidor.
-* **Los borrados no aparecen** (`isDeleted`), ni los DMs: solo se busca en canales de servidor.
+* **Los borrados no aparecen** (`isDeleted`). La búsqueda del servidor no incluye DMs.
+* **Búsqueda en un DM (y en un canal):** `GET /channels/:channelId/messages/search`, con los mismos filtros,
+  validaciones, orden y paginación. Busca solo en la conversación abierta, como el historial, y usa su mismo
+  acceso (`channelAccessGuard`): en un `dm-…` hay que ser participante (`403` si no, `404` si no existe), y
+  en un canal de servidor, `VIEW_CHANNELS`. No le pregunta nada a Core en un DM.
+* **Autor en un DM:** los mensajes de un DM se guardan con el id canónico del usuario (Auth), y con login
+  federado el cliente puede conocerse por un alias (su `X-User-Id`). Si el `authorId` es el `X-User-Id` de
+  quien busca, se toma como su id canónico; así "mis mensajes" encuentra los suyos.
 * **Orden y paginación:** del más nuevo al más viejo, 25 por página (hasta 50). Se pide uno de más para
   saber si hay otra página sin contar todo. La respuesta es `{ messages, hasMore, nextCursor }`;
   `nextCursor` va como `before` en el pedido siguiente.
@@ -50,6 +57,7 @@ Restricciones que condicionan el diseño:
 | Motor de búsqueda aparte (Atlas Search, Elasticsearch) | Resuelve relevancia y volumen, pero suma infraestructura y sincronización para el tamaño actual del sistema. Se puede sumar después sin cambiar el contrato del endpoint. |
 | Que el cliente mande los canales donde buscar | Podría pedir canales que no ve. Core es la fuente de los permisos. |
 | Endpoint de Core nuevo (`/internal/servers/{id}/visible-channels`) | Duplicaría el cálculo de permisos que ya hace `visible-channels`. Un parámetro opcional mantiene un solo camino y no rompe a quien no lo manda. |
+| Buscar en todos los DMs del usuario a la vez | Mezcla conversaciones distintas en una lista y no es lo que se busca al estar en una (Discord también busca en la conversación abierta). Se puede sumar después con la lista de `GET /conversations` como canales. |
 | `403` en un servidor donde no es miembro | Habría que distinguir en Core "no es miembro" de "no ve ningún canal". Con la lista vacía, el resultado es el mismo para los dos casos y no se filtra nada. |
 
 **Consecuencias:**

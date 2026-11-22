@@ -83,6 +83,62 @@ function isObjectIdString(value: unknown): value is string {
   return typeof value === 'string' && /^[0-9a-f]{24}$/i.test(value);
 }
 
+/** Filtros de búsqueda ya validados: el término recortado, el autor y el cursor como ObjectId. */
+interface NormalizedSearch {
+  term: string;
+  authorId: string;
+  limit: number;
+  before?: mongoose.Types.ObjectId;
+}
+
+/** @throws ValidationError si no hay término ni autor, o algún filtro no es válido */
+function normalizeSearchFilters(filters: MessageSearchFilters): NormalizedSearch {
+  const term = typeof filters.query === 'string' ? filters.query.trim() : '';
+  const authorId = typeof filters.authorId === 'string' ? filters.authorId.trim() : '';
+  const limit = filters.limit ?? DEFAULT_SEARCH_LIMIT;
+
+  if (!term && !authorId) {
+    throw new ValidationError('A search term (q) or an author (authorId) is required');
+  }
+  if (term.length > MAX_SEARCH_QUERY_LENGTH) {
+    throw new ValidationError(`The search term cannot exceed ${MAX_SEARCH_QUERY_LENGTH} characters`);
+  }
+  if (!Number.isInteger(limit) || limit < 1 || limit > MAX_SEARCH_LIMIT) {
+    throw new ValidationError(`limit must be an integer between 1 and ${MAX_SEARCH_LIMIT}`);
+  }
+  if (filters.before !== undefined && !isObjectIdString(filters.before)) {
+    throw new ValidationError('before must be a valid message id');
+  }
+  return {
+    term,
+    authorId,
+    limit,
+    ...(filters.before ? { before: new mongoose.Types.ObjectId(filters.before) } : {}),
+  };
+}
+
+/** Una página de resultados en esos canales, del más nuevo al más viejo, sin los borrados. */
+async function findSearchPage(channelIds: string[], search: NormalizedSearch): Promise<MessageSearchPage> {
+  if (channelIds.length === 0) {
+    return { messages: [], hasMore: false, nextCursor: null };
+  }
+
+  const query = {
+    channelId: channelIds.length === 1 ? channelIds[0] : { $in: channelIds },
+    isDeleted: { $ne: true },
+    ...(search.term ? { content: { $regex: buildContainsPattern(search.term), $options: 'i' } } : {}),
+    ...(search.authorId ? { authorId: search.authorId } : {}),
+    ...(search.before ? { _id: { $lt: search.before } } : {}),
+  };
+
+  // Uno de más para saber si hay otra página sin contar todo
+  const found = await Message.find(query).sort({ _id: -1 }).limit(search.limit + 1).lean<IMessage[]>();
+  const page = found.slice(0, search.limit).map(toPayload);
+  const hasMore = found.length > search.limit;
+
+  return { messages: page, hasMore, nextCursor: hasMore ? page[page.length - 1].id : null };
+}
+
 function toPayload(msg: IMessage): MessagePayload {
   const isDeleted = msg.isDeleted === true;
   return {
@@ -162,45 +218,23 @@ export class ChatService {
    * @throws UpstreamUnavailableError si Core no responde
    */
   static async searchMessages(userId: string, serverId: string, filters: MessageSearchFilters): Promise<MessageSearchPage> {
-    const term = typeof filters.query === 'string' ? filters.query.trim() : '';
-    const authorId = typeof filters.authorId === 'string' ? filters.authorId.trim() : '';
-    const limit = filters.limit ?? DEFAULT_SEARCH_LIMIT;
-
     if (!UUID.test(serverId)) {
       throw new ValidationError('serverId must be a valid server id');
     }
-    if (!term && !authorId) {
-      throw new ValidationError('A search term (q) or an author (authorId) is required');
-    }
-    if (term.length > MAX_SEARCH_QUERY_LENGTH) {
-      throw new ValidationError(`The search term cannot exceed ${MAX_SEARCH_QUERY_LENGTH} characters`);
-    }
-    if (!Number.isInteger(limit) || limit < 1 || limit > MAX_SEARCH_LIMIT) {
-      throw new ValidationError(`limit must be an integer between 1 and ${MAX_SEARCH_LIMIT}`);
-    }
-    if (filters.before !== undefined && !isObjectIdString(filters.before)) {
-      throw new ValidationError('before must be a valid message id');
-    }
+    const search = normalizeSearchFilters(filters);
 
     const { channelIds } = await PermissionService.getVisibleChannels(userId, serverId);
-    if (channelIds.length === 0) {
-      return { messages: [], hasMore: false, nextCursor: null };
-    }
+    return findSearchPage(channelIds, search);
+  }
 
-    const query = {
-      channelId: { $in: channelIds },
-      isDeleted: { $ne: true },
-      ...(term ? { content: { $regex: buildContainsPattern(term), $options: 'i' } } : {}),
-      ...(authorId ? { authorId } : {}),
-      ...(filters.before ? { _id: { $lt: new mongoose.Types.ObjectId(filters.before) } } : {}),
-    };
-
-    // Uno de más para saber si hay otra página sin contar todo
-    const found = await Message.find(query).sort({ _id: -1 }).limit(limit + 1).lean<IMessage[]>();
-    const page = found.slice(0, limit).map(toPayload);
-    const hasMore = found.length > limit;
-
-    return { messages: page, hasMore, nextCursor: hasMore ? page[page.length - 1].id : null };
+  /**
+   * Busca dentro de un solo canal, con los mismos filtros y la misma paginación que la del servidor. Es la
+   * búsqueda de un DM (`dm-…`, ADR-04): el acceso lo valida la ruta (channelAccessGuard), igual que el historial.
+   *
+   * @throws ValidationError si no hay término ni autor, o algún filtro no es válido
+   */
+  static async searchChannelMessages(channelId: string, filters: MessageSearchFilters): Promise<MessageSearchPage> {
+    return findSearchPage([channelId], normalizeSearchFilters(filters));
   }
 
   /**
