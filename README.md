@@ -188,13 +188,23 @@ A diferencia de un canal, una conversación sin registro de lectura no arranca l
 ### Inbox y presencia
 
 `GET /inbox/ws` es un socket por usuario, para enterarse de lo que pasa en conversaciones que no tiene abiertas.
-Solo recibe, por el canal de Redis `inbox:<userId>`:
+Recibe, por el canal de Redis `inbox:<userId>`:
 
 ```json
 { "type": "DM_MESSAGE", "conversationId": "dm-…", "message": {} }
 { "type": "DM_CONVERSATION", "conversation": {} }
 { "type": "SERVER_UPDATED", "serverId": "…" }
+{ "type": "MY_STATUS", "status": "dnd" }
 ```
+
+`MY_STATUS` avisa a las otras sesiones del usuario que cambió su estado elegido (`PUT /presence/me`).
+
+Lo único que manda el cliente (lo demás se ignora, sin cerrar el socket):
+
+| Mensaje | Respuesta |
+|---|---|
+| `{ "type": "PRESENCE_SUBSCRIBE", "userIds": [] }` (hasta 500) | `{ "type": "PRESENCE_SNAPSHOT", "statuses": { "<id>": "online" } }` con el estado actual. Reemplaza la lista anterior; desde ahí llega `{ "type": "PRESENCE_UPDATE", "userId", "status" }` cada vez que cambia uno, con el id tal como se pidió |
+| `{ "type": "ACTIVITY", "idle": true }` | Ninguna. Si todas sus pestañas en esta instancia están sin actividad, quien eligió `online` se ve `idle`. No molestar e Invisible no cambian |
 
 `SERVER_UPDATED` avisa que cambió el nombre, la descripción, el ícono o el banner de un servidor del usuario: el
 cliente vuelve a pedir `GET /api/v1/servers` (ADR 0013 de `org-docs`).
@@ -202,8 +212,13 @@ cliente vuelve a pedir `GET /api/v1/servers` (ADR 0013 de `org-docs`).
 Al reconectar, el cliente vuelve a pedir `GET /conversations`. Mientras el inbox está conectado, la clave Redis
 `presence:<userId>` tiene un TTL de 60 s y la renueva cada pong del heartbeat. Al cerrarse el último socket de esa
 instancia se borra; si el usuario tiene otro en otra instancia, vuelve en el próximo ping.
-El estado elegido va en `presence:pref:<userId>`, sin TTL: se conserva entre sesiones y solo se ve mientras
-existe `presence:<userId>`.
+La clave vale `1` (activo) o `idle` (sin actividad). El estado elegido va en `presence:pref:<userId>`, sin TTL: se
+conserva entre sesiones y solo se ve mientras existe `presence:<userId>`.
+
+Cada cambio visible (conectarse, irse, cambiar el estado elegido, pasar a inactivo y volver) se publica en el canal
+de Redis `presence-updates` como `{ userId, status }`. Lo reciben todas las instancias y cada una lo reenvía a sus
+sockets suscriptos a ese usuario. Las renovaciones del heartbeat no publican nada (`SET … GET` compara con el valor
+anterior). Si una instancia se cae, sus claves vencen sin aviso: el cliente lo ve en el próximo `POST /presence`.
 
 ### Mensajes del servidor por el WebSocket
 

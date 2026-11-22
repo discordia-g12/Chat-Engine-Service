@@ -7,6 +7,7 @@ import { ReadStateService } from '../services/ReadStateService';
 import { PubSubService } from '../services/PubSubService';
 import { ConversationService } from '../services/ConversationService';
 import { PresenceService } from '../services/PresenceService';
+import { MAX_WATCHED_USERS, PresenceHub } from '../services/PresenceHub';
 import { canonicalUserGuard, channelAccessGuard } from '../helpers/auth';
 import { inboxChannelId, isDmChannel } from '../helpers/directMessages';
 import { toProblem, ValidationError, ForbiddenError } from '../errors';
@@ -16,8 +17,49 @@ export interface WebsocketPluginOptions {
   pingIntervalMs: number;
 }
 
+/** Lo que el cliente puede mandar por el inbox (lo demás se ignora). */
+type InboxClientMessage =
+  | { type: 'PRESENCE_SUBSCRIBE'; userIds: string[] }
+  | { type: 'ACTIVITY'; idle: boolean };
+
+function parseInboxMessage(raw: unknown): InboxClientMessage | null {
+  let data: unknown;
+  try {
+    data = JSON.parse(String(raw));
+  } catch {
+    return null;
+  }
+  if (typeof data !== 'object' || data === null) return null;
+  const message = data as Record<string, unknown>;
+  if (
+    message.type === 'PRESENCE_SUBSCRIBE' &&
+    Array.isArray(message.userIds) &&
+    message.userIds.length <= MAX_WATCHED_USERS &&
+    message.userIds.every((id) => typeof id === 'string' && id !== '')
+  ) {
+    return { type: 'PRESENCE_SUBSCRIBE', userIds: message.userIds as string[] };
+  }
+  if (message.type === 'ACTIVITY' && typeof message.idle === 'boolean') {
+    return { type: 'ACTIVITY', idle: message.idle };
+  }
+  return null;
+}
+
+/** Sin actividad solo si todas sus pestañas en esta instancia lo están. */
+function isUserInactive(channelId: string): boolean {
+  const sessions = SessionManager.getChannelSockets(channelId).map((socket) => SessionManager.getSession(socket));
+  return sessions.length > 0 && sessions.every((session) => session?.inactive === true);
+}
+
 export default async function websocketPlugin(app: FastifyInstance, opts: WebsocketPluginOptions) {
   app.register(fastifyWebsocket);
+
+  // Los cambios de presencia (de esta instancia o de otra, por Redis) van a los sockets que los siguen
+  PubSubService.setPresenceHandler((rawChange) => PresenceHub.deliver(rawChange));
+  app.addHook('onClose', async () => {
+    PubSubService.setPresenceHandler(null);
+    PresenceHub.clear();
+  });
 
   app.register(async function (fastify) {
     fastify.get(
@@ -120,9 +162,10 @@ export default async function websocketPlugin(app: FastifyInstance, opts: Websoc
       }
     );
 
-    // Socket por usuario: solo recibe (DM_MESSAGE, DM_CONVERSATION). Lo que se perdió mientras estaba
-    // desconectado se recupera con GET /conversations. Si Redis falla, la presencia queda desactualizada,
-    // pero los mensajes se siguen entregando.
+    // Socket por usuario: recibe DM_MESSAGE, DM_CONVERSATION, PRESENCE_UPDATE, etc. Lo único que manda el
+    // cliente es a quién sigue (PRESENCE_SUBSCRIBE) y si hay actividad (ACTIVITY). Lo que se perdió mientras
+    // estaba desconectado se recupera con GET /conversations. Si Redis falla, la presencia queda
+    // desactualizada, pero los mensajes se siguen entregando.
     fastify.get('/inbox/ws', { websocket: true, preValidation: canonicalUserGuard }, (connection, req) => {
       const userId = req.userId;
       const channelId = inboxChannelId(userId);
@@ -131,16 +174,41 @@ export default async function websocketPlugin(app: FastifyInstance, opts: Websoc
       SessionManager.register({ userId, channelId, serverId: '', socket: connection, canSend: false, connectedAt: new Date() });
 
       const renewPresence = () => {
-        PresenceService.touch(userId).catch(logPresenceError);
+        PresenceService.touch(userId, isUserInactive(channelId)).catch(logPresenceError);
       };
       renewPresence();
       const stopHeartbeat = startHeartbeat(connection, opts.pingIntervalMs, renewPresence);
 
+      connection.on('message', (raw: unknown) => {
+        const message = parseInboxMessage(raw);
+        if (!message) return;
+
+        if (message.type === 'ACTIVITY') {
+          const session = SessionManager.getSession(connection);
+          if (!session || session.inactive === message.idle) return;
+          session.inactive = message.idle;
+          renewPresence();
+          return;
+        }
+
+        PresenceHub.watch(connection, message.userIds)
+          .then((statuses) => {
+            if (statuses && connection.readyState === 1) {
+              connection.send(JSON.stringify({ type: 'PRESENCE_SNAPSHOT', statuses }));
+            }
+          })
+          .catch(logPresenceError);
+      });
+
       connection.on('close', () => {
         stopHeartbeat();
+        PresenceHub.unwatch(connection);
         SessionManager.unregister(connection);
         if (SessionManager.getChannelSockets(channelId).length === 0) {
           PresenceService.clear(userId).catch(logPresenceError);
+        } else {
+          // Si se fue la única pestaña activa, las que quedan pueden estar sin actividad
+          renewPresence();
         }
       });
     });
