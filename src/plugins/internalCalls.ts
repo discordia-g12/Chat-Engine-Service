@@ -1,6 +1,6 @@
 import { FastifyInstance } from 'fastify';
 import { NotFoundError, PayloadTooLargeError, ValidationError } from '../errors';
-import { rejectProxiedRequests } from '../helpers/internalOnly';
+import { rejectProxiedRequests, requireInternalToken } from '../helpers/internalOnly';
 import { USER_NOT_FOUND } from '../helpers/directMessages';
 import { ConversationService } from '../services/ConversationService';
 import { PubSubService } from '../services/PubSubService';
@@ -62,7 +62,7 @@ export default async function internalCallsPlugin(app: FastifyInstance) {
     return { userId: user.userId, suspended: user.suspended };
   });
 
-  app.post('/internal/inbox/events', async (req, reply) => {
+  app.post('/internal/inbox/events', { onRequest: requireInternalToken }, async (req, reply) => {
     const body = isPlainObject(req.body) ? req.body : {};
     const userIds = parseUserIds(body.userIds);
     const event = parseEvent(body.event);

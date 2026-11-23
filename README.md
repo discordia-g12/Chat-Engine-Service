@@ -87,6 +87,7 @@ Para levantarlo junto con el Gateway y los demás servicios, usar el compose del
 | `RABBITMQ_EXCHANGE` | `server.events` | Exchange del que consume |
 | `RABBITMQ_USER_EXCHANGE` | `user.events` | Exchange de Auth-User, del que consume `user.suspended` |
 | `RABBITMQ_QUEUE` | `chat_engine_events` | Cola durable del servicio |
+| `INTERNAL_API_TOKEN` | — | Secreto compartido con Voice-Signaling y Notification: `POST /internal/inbox/events` exige `X-Internal-Token` igual a este valor (`401` si no). Sin la variable no se exige (y se avisa en el log): es el modo de transición hasta cargarla en el nodo |
 
 ## API
 
@@ -159,7 +160,8 @@ nodo (realtime) y es el dueño de la llamada: Chat solo dice quién puede llamar
 
   Los 404 de estas rutas siempre traen `code`: un 404 sin código es una ruta que este Chat no tiene, y Voice lo
   trata como Chat no disponible.
-- `POST /internal/inbox/events` con `{ userIds, event }`: publica `event` tal cual en el inbox de cada usuario
+- `POST /internal/inbox/events` con `{ userIds, event }` y el header `X-Internal-Token` (ver
+  `INTERNAL_API_TOKEN`; `401` si falta o no coincide): publica `event` tal cual en el inbox de cada usuario
   (`inbox:<id>`) y responde `202`. `userIds`: de 1 a 10 ids no vacíos (los repetidos reciben uno solo).
   `event.type` tiene que empezar con `CALL_` (`400` si no): el resto de los eventos los publica Chat. `413` si
   `event` pasa los 8 KB.
