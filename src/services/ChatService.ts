@@ -86,6 +86,12 @@ export async function clearSummaryPending(replyId: mongoose.Types.ObjectId): Pro
   );
 }
 
+/** Historial (C4): por página, 50 por defecto y hasta 100; `?limit=1000000` le pedía todo el canal a Atlas M0. */
+export const DEFAULT_HISTORY_LIMIT = 50;
+export const MAX_HISTORY_LIMIT = 100;
+/** Lo que se repone al reconectar: los más recientes. Si faltan más, el cliente los pide con el historial. */
+export const MAX_MISSED_MESSAGES = 100;
+
 /** Máximo de mensajes fijados por canal o DM. */
 export const PINNED_LIMIT = 50;
 
@@ -235,19 +241,27 @@ export class ChatService {
    * Retrieves paginated message history for a channel in chronological order.
    *
    * @param channelId Target channel identifier
-   * @param limit Maximum number of messages to fetch (default: 50)
+   * @param limit Maximum number of messages to fetch (default: 50, hasta MAX_HISTORY_LIMIT)
    * @param before Optional message ID cursor to load older messages
+   * @throws ValidationError si `limit` no es un entero entre 1 y MAX_HISTORY_LIMIT, o `before` no es un id
    */
   static async getHistory(
     channelId: string,
-    limit = 50,
+    limit = DEFAULT_HISTORY_LIMIT,
     before?: string
   ): Promise<MessagePayload[]> {
+    if (!Number.isInteger(limit) || limit < 1 || limit > MAX_HISTORY_LIMIT) {
+      throw new ValidationError(`limit must be an integer between 1 and ${MAX_HISTORY_LIMIT}`);
+    }
+    if (before !== undefined && !isObjectIdString(before)) {
+      throw new ValidationError('before must be a valid message id');
+    }
+
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const query: Record<string, any> = { channelId, ...NOT_A_THREAD_REPLY };
 
     if (before) {
-      query._id = { $lt: before };
+      query._id = { $lt: new mongoose.Types.ObjectId(before) };
     }
 
     const messages = await Message.find(query)
@@ -287,8 +301,9 @@ export class ChatService {
   }
 
   /**
-   * Retrieves messages missed during temporary client disconnection.
-   * Fetches all messages created after the last known message in chronological order.
+   * Retrieves messages missed during temporary client disconnection, in chronological order. Como mucho los
+   * MAX_MISSED_MESSAGES más recientes (C4): un corte largo en un canal muy activo no trae todo de una vez, y el
+   * resto se pide con el historial. Un id que no es un ObjectId no repone nada.
    *
    * @param channelId Target channel identifier
    * @param lastMessageIdSeen Message ID cursor provided by client handshake
@@ -297,6 +312,9 @@ export class ChatService {
     channelId: string,
     lastMessageIdSeen: string
   ): Promise<MessagePayload[]> {
+    if (!isObjectIdString(lastMessageIdSeen)) {
+      return [];
+    }
     const lastSeen = await Message.findById(lastMessageIdSeen).lean<IMessage>();
     if (!lastSeen) {
       return [];
@@ -305,12 +323,13 @@ export class ChatService {
     const missedMessages = await Message.find({
       channelId,
       ...NOT_A_THREAD_REPLY,
-      _id: { $gt: lastMessageIdSeen },
+      _id: { $gt: new mongoose.Types.ObjectId(lastMessageIdSeen) },
     })
-      .sort({ _id: 1 })
+      .sort({ _id: -1 })
+      .limit(MAX_MISSED_MESSAGES)
       .lean<IMessage[]>();
 
-    return missedMessages.map(toPayload);
+    return missedMessages.reverse().map(toPayload);
   }
 
   /**

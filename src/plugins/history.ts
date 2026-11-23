@@ -10,9 +10,10 @@ import { isDmChannel } from '../helpers/directMessages';
 export default async function historyPlugin(app: FastifyInstance) {
   app.get('/channels/:channelId/messages', { preValidation: channelAccessGuard }, async (req) => {
     const { channelId } = req.params as { channelId: string };
-    const { limit = 50, before } = req.query as { limit?: number; before?: string };
+    const { limit, before } = req.query as { limit?: string; before?: string };
 
-    const messages = await ChatService.getHistory(channelId, Number(limit), before);
+    // Sin limit, el default; con un valor que no es número, Number da NaN y getHistory responde 400
+    const messages = await ChatService.getHistory(channelId, limit === undefined ? undefined : Number(limit), before);
     return { messages };
   });
 

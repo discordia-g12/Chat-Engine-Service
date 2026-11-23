@@ -95,12 +95,14 @@ En producción está detrás de Kong, bajo `/api/v1/chat` (Kong saca ese prefijo
 
 - `GET /channels/:channelId/ws?last_message_id_seen=`: WebSocket del canal. El cliente manda
   `{"content": "..."}` y recibe cada mensaje nuevo del canal. Al reconectar con `last_message_id_seen`,
-  recibe los posteriores a ese mensaje.
+  recibe los posteriores a ese mensaje (como mucho los 100 más recientes; el resto, con el historial). Un id
+  que no es un ObjectId no repone nada.
 - Menciones en el texto: `<@userId>`, `<@&roleId>` y `@everyone`. Las de rol y `@everyone` exigen
   `MENTION_EVERYONE`; sin ese permiso quedan como texto. Cada mensaje trae en `mentions` las que notifican.
   Ver ADR-03.
-- `GET /channels/:channelId/messages?limit=&before=`: historial en orden cronológico (50 por defecto).
-  `before` es el id del mensaje más viejo que ya tiene el cliente, para cargar los anteriores.
+- `GET /channels/:channelId/messages?limit=&before=`: historial en orden cronológico (50 por defecto, hasta 100).
+  `before` es el id del mensaje más viejo que ya tiene el cliente, para cargar los anteriores. `400` si `limit`
+  no es un entero entre 1 y 100 o `before` no es un id de mensaje.
 - `GET /servers/:serverId/messages/search?q=&authorId=&limit=&before=`: busca mensajes del servidor por
   texto (`q`, sin distinguir mayúsculas ni tildes), por autor (`authorId`) o las dos cosas, solo en los
   canales que el usuario puede ver. Del más nuevo al más viejo, 25 por página (hasta 50):
