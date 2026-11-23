@@ -253,6 +253,41 @@ describe('Rutas internas de llamadas privadas (#50)', () => {
     const send = (payload: unknown, headers: Record<string, string> = {}) =>
       app.inject({ method: 'POST', url: '/internal/inbox/events', payload: payload as object, headers });
 
+    describe('con INTERNAL_API_TOKEN (V9)', () => {
+      const token = 'a'.repeat(64);
+      before(() => {
+        process.env.INTERNAL_API_TOKEN = token;
+      });
+      after(() => {
+        delete process.env.INTERNAL_API_TOKEN;
+      });
+
+      it('202 con el token correcto', async () => {
+        const res = await send({ userIds: ['alice'], event: ringing }, { 'x-internal-token': token });
+        assert.strictEqual(res.statusCode, 202);
+        assert.strictEqual(published.length, 1);
+      });
+
+      for (const [name, headers] of [
+        ['sin token', {}],
+        ['con otro token del mismo largo', { 'x-internal-token': 'b'.repeat(64) }],
+        ['con un token de otro largo', { 'x-internal-token': 'a' }],
+      ] as [string, Record<string, string>][]) {
+        it(`401 ${name}, sin publicar nada`, async () => {
+          assertProblem(await send({ userIds: ['alice'], event: ringing }, headers), 401);
+          assert.deepStrictEqual(published, []);
+        });
+      }
+
+      it('por Kong sigue siendo 404, aunque traiga el token', async () => {
+        const res = await send(
+          { userIds: ['alice'], event: ringing },
+          { 'x-internal-token': token, 'x-user-id': 'alice' }
+        );
+        assertProblem(res, 404);
+      });
+    });
+
     it('202 y publica el evento tal cual en el inbox de cada uno', async () => {
       const res = await send({ userIds: ['alice', 'bob'], event: ringing });
 
