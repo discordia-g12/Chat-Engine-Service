@@ -55,6 +55,17 @@ export interface MessagePayload {
   type?: string;
   /** Mensaje del sistema (`type: 'system'`): qué pasó y a quién. La interfaz arma el texto con su nombre actual. */
   system?: { event: SystemEvent; userId: string };
+  /** Respuesta de hilo: id del mensaje raíz (ADR-07). */
+  threadParentId?: string;
+  /** Raíz de un hilo: cuántas respuestas tiene y cuándo fue la última. */
+  thread?: ThreadSummaryPayload;
+}
+
+export interface ThreadSummaryPayload {
+  replyCount: number;
+  lastReplyAt: Date;
+  lastReplyId: string;
+  participantIds: string[];
 }
 
 /** Máximo de mensajes fijados por canal o DM. */
@@ -143,7 +154,10 @@ async function findSearchPage(channelIds: string[], search: NormalizedSearch): P
   return { messages: page, hasMore, nextCursor: hasMore ? page[page.length - 1].id : null };
 }
 
-function toPayload(msg: IMessage): MessagePayload {
+/** Lo que excluye las respuestas de hilo de las consultas del canal (historial, reconexión, no leídos). */
+export const NOT_A_THREAD_REPLY = { threadParentId: { $exists: false } } as const;
+
+export function toPayload(msg: IMessage): MessagePayload {
   const isDeleted = msg.isDeleted === true;
   return {
     id: msg._id.toString(),
@@ -183,6 +197,18 @@ function toPayload(msg: IMessage): MessagePayload {
     ...(msg.pinned && !isDeleted ? { pinnedAt: msg.pinnedAt ?? null, pinnedBy: msg.pinnedBy ?? null } : {}),
     ...(msg.systemEvent && !isDeleted ? { type: 'system', system: { event: msg.systemEvent, userId: msg.authorId } } : {}),
     ...(isDeleted ? { type: 'deleted', isDeleted: true, deletedAt: msg.deletedAt ?? null } : {}),
+    ...(msg.threadParentId ? { threadParentId: msg.threadParentId.toString() } : {}),
+    // También en un raíz borrado: el hilo sigue accesible ("mensaje eliminado · 3 respuestas")
+    ...(msg.thread
+      ? {
+          thread: {
+            replyCount: msg.thread.replyCount,
+            lastReplyAt: msg.thread.lastReplyAt,
+            lastReplyId: msg.thread.lastReplyId.toString(),
+            participantIds: msg.thread.participantIds ?? [],
+          },
+        }
+      : {}),
   };
 }
 
@@ -200,7 +226,7 @@ export class ChatService {
     before?: string
   ): Promise<MessagePayload[]> {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const query: Record<string, any> = { channelId };
+    const query: Record<string, any> = { channelId, ...NOT_A_THREAD_REPLY };
 
     if (before) {
       query._id = { $lt: before };
@@ -260,6 +286,7 @@ export class ChatService {
 
     const missedMessages = await Message.find({
       channelId,
+      ...NOT_A_THREAD_REPLY,
       _id: { $gt: lastMessageIdSeen },
     })
       .sort({ _id: 1 })
@@ -292,6 +319,7 @@ export class ChatService {
    * @param authorId User sending the message
    * @param channelId Target channel identifier
    * @param content Text body of the message
+   * @param threadParentId Raíz del hilo si es una respuesta (lo valida ThreadService antes de llamar)
    * @throws UpstreamUnavailableError si hay que validar @everyone o un rol y Core no responde
    */
   static async sendMessage(
@@ -299,7 +327,8 @@ export class ChatService {
     channelId: string,
     content: string,
     attachmentsOrSkip?: MessageAttachmentPayload[] | boolean,
-    skipCheck = false
+    skipCheck = false,
+    threadParentId?: mongoose.Types.ObjectId
   ): Promise<MessagePayload> {
     const attachments = Array.isArray(attachmentsOrSkip) ? attachmentsOrSkip : undefined;
     const skipPermissionCheck = typeof attachmentsOrSkip === 'boolean' ? attachmentsOrSkip : skipCheck;
@@ -333,6 +362,7 @@ export class ChatService {
       ...(roleIds.length > 0 ? { mentionRoleIds: roleIds } : {}),
       ...(everyone ? { mentionEveryone: true } : {}),
       ...(attachments && attachments.length > 0 ? { attachments } : {}),
+      ...(threadParentId ? { threadParentId } : {}),
     });
 
     await messageDocument.validate();
@@ -532,6 +562,14 @@ export class ChatService {
 
     await message.save();
 
+    // El contador del raíz cuenta solo respuestas visibles. Solo acá: un segundo DELETE sale antes, sin restar.
+    if (message.threadParentId) {
+      await Message.updateOne(
+        { _id: message.threadParentId, 'thread.replyCount': { $gt: 0 } },
+        { $inc: { 'thread.replyCount': -1 } }
+      );
+    }
+
     // Audit Log: Si un moderador elimina el mensaje de otro usuario en un servidor
     if (!isDm && !isAuthor) {
       let targetServerId = serverId;
@@ -684,6 +722,11 @@ export class ChatService {
 
     if (message.systemEvent) {
       throw new ValidationError('System messages cannot be pinned');
+    }
+
+    // Los fijados son del canal: una respuesta de hilo no está en el canal
+    if (message.threadParentId) {
+      throw new ValidationError('Thread replies cannot be pinned');
     }
 
     if ((message.pinned === true) === pinned) {

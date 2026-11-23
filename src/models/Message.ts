@@ -19,6 +19,15 @@ export interface IReaction {
 export const SYSTEM_EVENTS = ['member_join'] as const;
 export type SystemEvent = (typeof SYSTEM_EVENTS)[number];
 
+/** Resumen del hilo, guardado en el mensaje raíz (ADR-07): se actualiza en cada respuesta. */
+export interface IThreadSummary {
+  replyCount: number;
+  lastReplyAt: Date;
+  lastReplyId: mongoose.Types.ObjectId;
+  /** Autor del raíz, quienes respondieron y los mencionados, con tope MAX_THREAD_PARTICIPANTS. */
+  participantIds: string[];
+}
+
 export interface IMessage extends Document {
   content: string;
   authorId: string;
@@ -41,6 +50,10 @@ export interface IMessage extends Document {
   systemEvent?: SystemEvent;
   /** Id del evento de RabbitMQ que lo creó (message_id del Outbox): una entrega repetida no lo duplica. */
   sourceEventId?: string;
+  /** Respuesta de hilo: id del mensaje raíz. No aparece en el historial del canal (ADR-07). */
+  threadParentId?: mongoose.Types.ObjectId;
+  /** Solo en el raíz de un hilo con al menos una respuesta. */
+  thread?: IThreadSummary;
 }
 
 const AttachmentSchema = new Schema({
@@ -56,6 +69,13 @@ const ReactionSchema = new Schema({
   count: { type: Number, required: true, default: 1 },
   users: { type: [String], default: [] },
   emojiId: { type: String, default: undefined },
+}, { _id: false });
+
+const ThreadSummarySchema = new Schema({
+  replyCount: { type: Number, required: true, default: 0 },
+  lastReplyAt: { type: Date, required: true },
+  lastReplyId: { type: Schema.Types.ObjectId, required: true },
+  participantIds: { type: [String], default: [] },
 }, { _id: false });
 
 const MessageSchema: Schema = new Schema({
@@ -121,6 +141,8 @@ const MessageSchema: Schema = new Schema({
   pinnedBy: { type: String, default: null },
   systemEvent: { type: String, enum: SYSTEM_EVENTS, default: undefined },
   sourceEventId: { type: String, default: undefined },
+  threadParentId: { type: Schema.Types.ObjectId, default: undefined },
+  thread: { type: ThreadSummarySchema, default: undefined },
 }, {
   strict: true,
 });
@@ -133,6 +155,9 @@ MessageSchema.index({ createdAt: 1, authorId: 1 });
 MessageSchema.index({ channelId: 1, pinnedAt: -1 }, { partialFilterExpression: { pinned: true } });
 // Idempotencia de los mensajes del sistema: solo indexa los que vienen de un evento.
 MessageSchema.index({ sourceEventId: 1 }, { unique: true, partialFilterExpression: { sourceEventId: { $type: 'string' } } });
+
+// Respuestas de un hilo (`GET …/messages/:id/thread`): solo indexa las respuestas.
+MessageSchema.index({ threadParentId: 1, _id: 1 }, { partialFilterExpression: { threadParentId: { $type: 'objectId' } } });
 
 export const Message = mongoose.model<IMessage>('Message', MessageSchema);
 

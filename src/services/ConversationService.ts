@@ -263,6 +263,19 @@ export class ConversationService {
   }
 
   /**
+   * Mismas reglas que para escribir, para una respuesta de hilo en un DM (ADR-07). Una respuesta no acepta
+   * la conversación: si falta aceptarla, se escribe en el chat principal.
+   *
+   * @throws ForbiddenError `DM_NOT_DELIVERABLE` si hay bloqueo o suspensión, `DM_PENDING` si falta aceptar
+   * @throws UpstreamUnavailableError si Auth no responde
+   */
+  static async assertCanReplyInThread(userId: string, channelId: string): Promise<IConversation> {
+    const { conversation, reopens } = await this.checkSend(userId, channelId);
+    if (reopens) throw pending();
+    return conversation;
+  }
+
+  /**
    * Revisa si el usuario puede escribir. `reopens` indica que la conversación todavía no está aceptada y que
    * este mensaje la acepta: ya son amigos, o escribe quien la rechazó.
    */

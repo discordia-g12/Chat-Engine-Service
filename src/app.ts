@@ -4,6 +4,7 @@ import { DEFAULT_PING_INTERVAL_MS } from './helpers/heartbeat';
 import { EventConsumer } from './services/EventConsumer';
 import historyPlugin from './plugins/history';
 import messagesPlugin from './plugins/messages';
+import threadsPlugin from './plugins/threads';
 import readStatesPlugin from './plugins/readStates';
 import searchPlugin from './plugins/search';
 import attachmentsPlugin from './plugins/attachments';
@@ -34,6 +35,7 @@ function buildApp(opts: BuildAppOptions = {}): FastifyInstance {
   });
   app.register(historyPlugin);
   app.register(messagesPlugin);
+  app.register(threadsPlugin);
   app.register(readStatesPlugin);
   app.register(searchPlugin);
   app.register(attachmentsPlugin);

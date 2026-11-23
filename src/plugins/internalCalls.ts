@@ -8,8 +8,8 @@ import { RelationsService } from '../services/RelationsService';
 
 const MAX_RECIPIENTS = 10;
 const MAX_EVENT_BYTES = 8 * 1024;
-// Este endpoint solo reparte eventos de llamadas: cualquier otro tipo lo publica Chat por su cuenta
-const CALL_EVENT_PREFIX = 'CALL_';
+// Solo reparte eventos de llamadas (Voice) y avisos (Notification, ADR 0017): el resto lo publica Chat por su cuenta
+const ALLOWED_EVENT_PREFIXES = ['CALL_', 'NOTIFICATION_'];
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -29,8 +29,9 @@ function parseEvent(value: unknown): Record<string, unknown> {
   if (!isPlainObject(value)) {
     throw new ValidationError("Falta 'event' o no es un objeto.");
   }
-  if (typeof value.type !== 'string' || !value.type.startsWith(CALL_EVENT_PREFIX)) {
-    throw new ValidationError(`'event.type' tiene que empezar con '${CALL_EVENT_PREFIX}'.`);
+  const type = value.type;
+  if (typeof type !== 'string' || !ALLOWED_EVENT_PREFIXES.some((prefix) => type.startsWith(prefix))) {
+    throw new ValidationError(`'event.type' tiene que empezar con ${ALLOWED_EVENT_PREFIXES.map((p) => `'${p}'`).join(' o ')}.`);
   }
   if (Buffer.byteLength(JSON.stringify(value)) > MAX_EVENT_BYTES) {
     throw new PayloadTooLargeError(`'event' no puede superar los ${MAX_EVENT_BYTES} bytes.`);
