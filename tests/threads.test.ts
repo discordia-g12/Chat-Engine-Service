@@ -380,6 +380,8 @@ describe('Threads (GET|POST /channels/:channelId/messages/:messageId/thread)', (
     it('resta del contador una sola vez y publica el raíz actualizado', async () => {
       const parent = await root();
       const saved = (await reply(channelId, parent.id, 'bob')).json();
+      // Que se confirme el aviso de la creación: si no, su eventId sigue en el outbox
+      await settle();
       published = [];
 
       const del = () =>
