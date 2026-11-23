@@ -31,7 +31,9 @@ describe('Threads (GET|POST /channels/:channelId/messages/:messageId/thread)', (
   let rabbitEvents: { routingKey: string; payload: Record<string, unknown> }[];
   const origPublish = PubSubService.publish;
   const origPublishInbox = PubSubService.publishToInbox;
-  const origRabbitPublish = EventConsumer.publish;
+  const origRabbitPublish = EventConsumer.publishConfirmed;
+  // Lo que contesta RabbitMQ a cada publicación (false: no la confirmó)
+  let rabbitConfirms: boolean;
 
   const json = (body: unknown) => ({ status: 200, json: async () => body }) as Response;
 
@@ -73,7 +75,7 @@ describe('Threads (GET|POST /channels/:channelId/messages/:messageId/thread)', (
   after(async () => {
     PubSubService.publish = origPublish;
     PubSubService.publishToInbox = origPublishInbox;
-    EventConsumer.publish = origRabbitPublish;
+    EventConsumer.publishConfirmed = origRabbitPublish;
     globalThis.fetch = originalFetch;
     await app.close();
     await disconnectDB();
@@ -95,9 +97,10 @@ describe('Threads (GET|POST /channels/:channelId/messages/:messageId/thread)', (
     PubSubService.publishToInbox = async (userId: string, p: unknown) => {
       inboxEvents.push({ userId, payload: p as Record<string, unknown> });
     };
-    EventConsumer.publish = (routingKey: string, payload: Record<string, unknown>) => {
+    rabbitConfirms = true;
+    EventConsumer.publishConfirmed = async (routingKey: string, payload: Record<string, unknown>) => {
       rabbitEvents.push({ routingKey, payload });
-      return true;
+      return rabbitConfirms;
     };
   });
 
@@ -360,6 +363,8 @@ describe('Threads (GET|POST /channels/:channelId/messages/:messageId/thread)', (
 
       const dbRoot = await Message.findById(parent._id).lean();
       assert.strictEqual(dbRoot?.thread?.replyCount, 0);
+      // Restó en el momento: no queda nada pendiente para el relay (D4)
+      assert.strictEqual((await Message.findById(saved.id).lean())?.outbox, undefined);
       const updates = published.filter((p) => p.payload.id === parent.id);
       assert.strictEqual(updates[0].payload.type, 'MESSAGE_UPDATED');
       assert.strictEqual((updates[0].payload.thread as { replyCount: number }).replyCount, 0);
@@ -414,7 +419,7 @@ describe('Threads (GET|POST /channels/:channelId/messages/:messageId/thread)', (
       assert.strictEqual(rabbitEvents.length, 0);
     });
 
-    it('si Core no responde, la respuesta se guarda igual y no se publica el aviso', async () => {
+    it('si Core no responde, la respuesta se guarda igual y el aviso queda en el outbox para reintentar', async () => {
       const parent = await root();
       coreDown = true;
 
@@ -423,6 +428,17 @@ describe('Threads (GET|POST /channels/:channelId/messages/:messageId/thread)', (
 
       assert.strictEqual(res.statusCode, 201);
       assert.strictEqual(rabbitEvents.length, 0);
+      const saved = await Message.findById(res.json().id).lean();
+      assert.ok(saved?.outbox?.eventId);
+      assert.strictEqual(saved?.outbox?.attempts, 1);
+      assert.strictEqual(saved?.outbox?.summaryPending, undefined);
+    });
+
+    it('publicado y confirmado, la respuesta queda sin outbox', async () => {
+      const parent = await root();
+      const res = await reply(channelId, parent.id, 'bob');
+      await settle();
+      assert.strictEqual((await Message.findById(res.json().id).lean())?.outbox, undefined);
     });
   });
 

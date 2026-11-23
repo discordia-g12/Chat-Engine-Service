@@ -41,8 +41,17 @@ Restricciones que condicionan el diseño:
 * **Aviso a Notification:** `chat.message.created` en `server.events`, con `thread_participant_ids` sin el
   autor y sin quienes ya no son miembros (una llamada a `/internal/servers/{id}/member-ids`). El contrato es
   general (lleva menciones y `is_dm`) para que las historias de notificaciones lo reutilicen. Sale después de
-  responder, sin demorar la respuesta. Si Server-Roles no responde, no se publica: antes perder un aviso que
-  mandarle el texto a quien se fue del servidor.
+  responder, sin demorar la respuesta, con *publisher confirms*: solo cuenta como enviado si RabbitMQ lo
+  confirmó. Si Server-Roles no responde se reintenta después (antes que mandarle el texto a quien se fue).
+* **Outbox en la misma respuesta** (`outbox: { eventId, summaryPending, serverId, attempts, nextAttemptAt }`).
+  Se escribe junto con la respuesta en una sola escritura de un documento, que en Mongo es atómica: no hace
+  falta transacción. `summaryPending` dice que el resumen del raíz todavía no la cuenta (también al borrarla);
+  `eventId` que el aviso no se confirmó. ThreadService completa los dos en el momento y saca el outbox.
+* **Relay** (`ThreadOutbox`, cada 10 s): toma lo vencido (índice parcial sobre `outbox.nextAttemptAt`, 15 s de
+  gracia para no pisarse con el camino normal). Si quedó `summaryPending`, recuenta el hilo desde las
+  respuestas; si quedó `eventId`, vuelve a publicar con el mismo id (Notification descarta las repeticiones).
+  Backoff de 30 s a 30 min; a los 25 intentos (unas 9 h) lo deja y lo loguea como error. Una respuesta
+  borrada antes de avisar no se avisa.
 
 **Alternativas descartadas:**
 
@@ -53,14 +62,18 @@ Restricciones que condicionan el diseño:
 | Contar respuestas al leer (`countDocuments` por mensaje) | Una consulta por mensaje en cada página del historial (N+1). El contador en el raíz viaja en el payload. |
 | Mandar la respuesta como un mensaje crudo con `threadParentId` | Los clientes que no conocen el campo la agregarían al canal principal. |
 | Que Chat decida a quién avisar | Obliga a Chat a leer las preferencias de Notification en cada mensaje. Chat manda quién participa y Notification filtra. |
-| Outbox en Mongo para el evento | Chat no tiene outbox ni worker; agregarlo es otro cambio. Se acepta perder un aviso, nunca el mensaje (queda en la deuda técnica). |
+| Publicar directo, sin outbox | Una caída entre guardar y publicar, o RabbitMQ caído, pierde el aviso. Con CA5 eso es un usuario que no se entera. |
+| Colección `Outbox` aparte con transacción | Atlas M0 tiene transacciones, pero los tests usan un Mongo de un nodo y la transacción suma latencia a cada respuesta. En el mismo documento la escritura ya es atómica. |
 
 **Consecuencias:**
 
 * Una escritura extra por respuesta (el raíz) y, en un servidor, una llamada a Server-Roles fuera del camino de
   la respuesta.
-* Si el proceso se cae entre guardar la respuesta y actualizar el raíz, el contador queda uno abajo. No hay
-  transacción: se acepta, igual que el límite de fijados (ADR-05).
+* Si el proceso se cae entre guardar la respuesta y actualizar el raíz, el relay recuenta el hilo. El recuento
+  y un `$inc` simultáneo pueden dejar el contador uno arriba hasta el próximo recuento: solo en la recuperación
+  de una caída, y se acepta.
+* Con más de una instancia (C3), dos relays pueden publicar el mismo aviso: lo descarta Notification por
+  `event_id`.
 * El texto del aviso es el contenido recortado a 140 caracteres, con las menciones en su formato crudo
   (`<@id>`): la interfaz las resuelve.
 * Un cliente que se reconecta no recibe las respuestas que se perdió por el socket: las relee al abrir el hilo.

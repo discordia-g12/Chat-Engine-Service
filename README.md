@@ -279,7 +279,9 @@ En el exchange `server.events`:
   organización). Lleva `server_id` (`null` en un DM), `channel_id`, `thread_id`, `message_id`, `author_id`,
   `thread_participant_ids` (sin el autor y sin quienes ya no son miembros), `mention_user_ids`,
   `mention_role_ids`, `mention_everyone`, `is_dm`, `preview` (140 caracteres) y `created_at`. Sale después de
-  guardar la respuesta, sin outbox: si RabbitMQ o Server-Roles no responden, el aviso se pierde y la respuesta no.
+  guardar la respuesta, con confirmación de RabbitMQ. Lo que no se confirmó (RabbitMQ o Server-Roles caídos, o el
+  proceso cayéndose en el medio) queda en el outbox de la propia respuesta y lo reintenta `ThreadOutbox` cada 10 s,
+  con el mismo `event_id`. Ver ADR-07.
 
 Si RabbitMQ no está al arrancar, el consumidor reintenta solo (de 1 a 30 s) sin bloquear el servicio.
 
@@ -311,7 +313,8 @@ src/
 ├── plugins/internalCalls.ts   /internal para las llamadas privadas (Voice-Signaling)
 ├── plugins/errorHandler.ts    errores RFC 7807
 ├── services/ChatService.ts    guardar mensajes, historial y mensajes perdidos
-├── services/ThreadService.ts  respuestas de hilo, resumen del raíz y aviso a Notification
+├── services/ThreadService.ts  respuestas de hilo y resumen del raíz
+├── services/ThreadOutbox.ts   outbox de los hilos: aviso a Notification y recuento si algo quedó a medias
 ├── services/SessionManager.ts sesiones abiertas por canal y usuario (en memoria)
 ├── services/PubSubService.ts   distribución de mensajes multi-nodo (Redis Pub/Sub)
 ├── services/PermissionService.ts  consulta a Server-Roles

@@ -57,6 +57,58 @@ async function waitFor(condition: () => boolean, timeoutMs = 1000): Promise<void
   }
 }
 
+/** Con canal de confirmación (publisher confirms): `ack` decide qué contesta el broker. */
+class ConfirmingConnection extends FakeConnection {
+  ack: 'ok' | 'nack' | 'never' | 'throw' = 'ok';
+  confirmed: { routingKey: string; messageId: string }[] = [];
+
+  async createConfirmChannel() {
+    return {
+      publish: (
+        _exchange: string,
+        routingKey: string,
+        _content: Buffer,
+        options: { messageId: string },
+        callback: (err: Error | null) => void
+      ) => {
+        if (this.ack === 'throw') throw new Error('channel closed');
+        this.confirmed.push({ routingKey, messageId: options.messageId });
+        if (this.ack === 'ok') callback(null);
+        if (this.ack === 'nack') callback(new Error('nacked'));
+        return true;
+      },
+      close: async () => undefined,
+    };
+  }
+}
+
+describe('EventConsumer.publishConfirmed (outbox de hilos, D3)', () => {
+  afterEach(async () => {
+    await EventConsumer.stop();
+  });
+
+  it('true solo si el broker confirma; false si rechaza, no contesta o el canal falla', async () => {
+    const conn = new ConfirmingConnection();
+    EventConsumer.start({ connect: async () => conn as unknown as ChannelModel, logger: silentLogger });
+    await waitFor(() => EventConsumer.isConnected);
+    await new Promise((r) => setTimeout(r, 5));
+
+    assert.strictEqual(await EventConsumer.publishConfirmed('chat.message.created', { event_id: 'e1' }), true);
+    assert.deepStrictEqual(conn.confirmed[0], { routingKey: 'chat.message.created', messageId: 'e1' });
+
+    conn.ack = 'nack';
+    assert.strictEqual(await EventConsumer.publishConfirmed('chat.message.created', { event_id: 'e2' }), false);
+    conn.ack = 'never';
+    assert.strictEqual(await EventConsumer.publishConfirmed('chat.message.created', { event_id: 'e3' }, { timeoutMs: 10 }), false);
+    conn.ack = 'throw';
+    assert.strictEqual(await EventConsumer.publishConfirmed('chat.message.created', { event_id: 'e4' }), false);
+  });
+
+  it('sin conexión, false (el aviso queda en el outbox)', async () => {
+    assert.strictEqual(await EventConsumer.publishConfirmed('chat.message.created', {}), false);
+  });
+});
+
 describe('EventConsumer: conexión a RabbitMQ', () => {
   afterEach(async () => {
     await EventConsumer.stop();

@@ -3,18 +3,23 @@ import mongoose from 'mongoose';
 import { Message, IMessage } from '../models/Message';
 import { NotFoundError, ValidationError } from '../errors';
 import { isDmChannel } from '../helpers/directMessages';
-import { ChatService, MessageAttachmentPayload, MessagePayload, ThreadSummaryPayload, toPayload } from './ChatService';
+import {
+  ChatService,
+  MessageAttachmentPayload,
+  MessagePayload,
+  OUTBOX_GRACE_MS,
+  ThreadSummaryPayload,
+  clearSummaryPending,
+  toPayload,
+} from './ChatService';
 import { ConversationService } from './ConversationService';
-import { EventConsumer } from './EventConsumer';
-import { PermissionService } from './PermissionService';
 import { PubSubService } from './PubSubService';
+import { MAX_THREAD_PARTICIPANTS, ThreadOutbox } from './ThreadOutbox';
 
-/** Tope de participantes guardados en el raíz: acota el documento y el evento a Notification. */
-export const MAX_THREAD_PARTICIPANTS = 100;
+export { MAX_THREAD_PARTICIPANTS, PREVIEW_MAX_LENGTH } from './ThreadOutbox';
+
 export const DEFAULT_THREAD_LIMIT = 50;
 export const MAX_THREAD_LIMIT = 100;
-/** Largo del texto que viaja en el evento para la notificación. */
-export const PREVIEW_MAX_LENGTH = 140;
 
 /** Se intentó abrir un hilo sobre una respuesta: los hilos tienen un solo nivel. */
 export const THREAD_NESTED = 'THREAD_NESTED';
@@ -42,10 +47,6 @@ function isObjectIdString(value: unknown): value is string {
   return typeof value === 'string' && /^[0-9a-f]{24}$/i.test(value);
 }
 
-/** Texto plano de una línea para el aviso: sin saltos ni espacios repetidos. */
-function toPreview(content: string): string {
-  return content.replace(/\s+/g, ' ').trim().slice(0, PREVIEW_MAX_LENGTH);
-}
 
 /**
  * El raíz del hilo dentro del canal. Un raíz borrado sigue valiendo (el hilo no se pierde); un mensaje del
@@ -166,9 +167,23 @@ export class ThreadService {
     const root = await findRoot(channelId, parentId);
 
     const files = Array.isArray(attachments) ? attachments : undefined;
-    const reply = await ChatService.sendMessage(authorId, channelId, content, files, true, root._id);
+    // La respuesta se guarda con lo que falta hacer (D3/D4): si el proceso se cae a mitad de camino, el relay
+    // completa el aviso y el contador
+    const outbox = {
+      eventId: crypto.randomUUID(),
+      summaryPending: true,
+      serverId,
+      attempts: 0,
+      nextAttemptAt: new Date(Date.now() + OUTBOX_GRACE_MS),
+    };
+    const reply = await ChatService.sendMessage(authorId, channelId, content, files, true, {
+      parentId: root._id,
+      outbox,
+    });
+    const replyId = new mongoose.Types.ObjectId(reply.id);
 
     const updated = await addReplyToSummary(root._id, reply, [root.authorId, authorId, ...reply.mentions.users]);
+    await clearSummaryPending(replyId);
     const parent = toPayload(updated ?? root);
     const thread = parent.thread as ThreadSummaryPayload;
 
@@ -179,8 +194,9 @@ export class ThreadService {
       await Promise.all(conversation.participantIds.map((id) => PubSubService.publishToInbox(id, inboxEvent)));
     }
 
-    void this.publishReplyEvent(reply, thread, serverId).catch((err) =>
-      logger.warn({ err, channelId, messageId: reply.id }, 'Failed to publish the thread reply event')
+    // El aviso sale ya, sin demorar la respuesta; si no se confirma, queda en el outbox y lo reintenta el relay
+    void ThreadOutbox.deliver(replyId).catch((err) =>
+      logger.warn({ err, channelId, messageId: reply.id }, 'Thread reply event left in the outbox')
     );
 
     return { reply, parent };
@@ -194,39 +210,5 @@ export class ThreadService {
     const root = await Message.findOne({ _id: parentId, channelId }).lean<IMessage>();
     if (!root) return;
     await PubSubService.publish(channelId, { ...toPayload(root), type: 'MESSAGE_UPDATED' });
-  }
-
-  /**
-   * `chat.message.created` para Notification (ADR 0017). Los destinatarios los decide Chat (quién participa);
-   * Notification decide a quién avisar según sus preferencias. En un servidor se sacan los que ya no son
-   * miembros: si Core no responde, no se publica (antes perder un aviso que mandárselo a quien se fue).
-   */
-  private static async publishReplyEvent(reply: MessagePayload, thread: ThreadSummaryPayload, serverId: string) {
-    let participants = thread.participantIds.filter((id) => id !== reply.authorId);
-    if (participants.length === 0) return;
-
-    if (serverId) {
-      const members = new Set(await PermissionService.getServerMemberIds(serverId));
-      participants = participants.filter((id) => members.has(id));
-      if (participants.length === 0) return;
-    }
-
-    // shortcut: sin outbox, una caída entre guardar y publicar pierde el aviso (no el mensaje). Ver DEUDA-TECNICA.
-    EventConsumer.publish('chat.message.created', {
-      event_id: crypto.randomUUID(),
-      event_type: 'chat.message.created',
-      server_id: serverId || null,
-      channel_id: reply.channelId,
-      thread_id: reply.threadParentId ?? null,
-      message_id: reply.id,
-      author_id: reply.authorId,
-      thread_participant_ids: participants,
-      mention_user_ids: reply.mentions.users,
-      mention_role_ids: reply.mentions.roles,
-      mention_everyone: reply.mentions.everyone,
-      is_dm: !serverId,
-      preview: toPreview(reply.content),
-      created_at: new Date(reply.createdAt).toISOString(),
-    });
   }
 }

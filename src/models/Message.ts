@@ -28,6 +28,22 @@ export interface IThreadSummary {
   participantIds: string[];
 }
 
+/**
+ * Lo que falta hacer después de guardar una respuesta de hilo (ADR-07, D3/D4). Va en el mismo documento: se
+ * escribe con la respuesta en una sola operación (atómica en Mongo), así una caída no lo pierde. Lo completa
+ * ThreadService en el momento y, si falla o el proceso se cae, ThreadOutbox lo reintenta.
+ */
+export interface IThreadOutbox {
+  /** El aviso `chat.message.created` todavía no lo confirmó RabbitMQ. Se reusa en cada intento (idempotencia). */
+  eventId?: string;
+  /** El resumen del raíz todavía no refleja esta respuesta (al crearla o al borrarla): hay que recontar. */
+  summaryPending?: boolean;
+  /** Servidor del canal ('' en un DM), para filtrar destinatarios que ya no son miembros. */
+  serverId: string;
+  attempts: number;
+  nextAttemptAt: Date;
+}
+
 export interface IMessage extends Document {
   content: string;
   authorId: string;
@@ -54,6 +70,8 @@ export interface IMessage extends Document {
   threadParentId?: mongoose.Types.ObjectId;
   /** Solo en el raíz de un hilo con al menos una respuesta. */
   thread?: IThreadSummary;
+  /** Solo en una respuesta con algo pendiente (ver IThreadOutbox). */
+  outbox?: IThreadOutbox;
 }
 
 const AttachmentSchema = new Schema({
@@ -76,6 +94,14 @@ const ThreadSummarySchema = new Schema({
   lastReplyAt: { type: Date, required: true },
   lastReplyId: { type: Schema.Types.ObjectId, required: true },
   participantIds: { type: [String], default: [] },
+}, { _id: false });
+
+const ThreadOutboxSchema = new Schema({
+  eventId: { type: String, default: undefined },
+  summaryPending: { type: Boolean, default: undefined },
+  serverId: { type: String, default: '' },
+  attempts: { type: Number, default: 0 },
+  nextAttemptAt: { type: Date, required: true },
 }, { _id: false });
 
 const MessageSchema: Schema = new Schema({
@@ -143,6 +169,7 @@ const MessageSchema: Schema = new Schema({
   sourceEventId: { type: String, default: undefined },
   threadParentId: { type: Schema.Types.ObjectId, default: undefined },
   thread: { type: ThreadSummarySchema, default: undefined },
+  outbox: { type: ThreadOutboxSchema, default: undefined },
 }, {
   strict: true,
 });
@@ -158,6 +185,9 @@ MessageSchema.index({ sourceEventId: 1 }, { unique: true, partialFilterExpressio
 
 // Respuestas de un hilo (`GET …/messages/:id/thread`): solo indexa las respuestas.
 MessageSchema.index({ threadParentId: 1, _id: 1 }, { partialFilterExpression: { threadParentId: { $type: 'objectId' } } });
+
+// Outbox de los hilos: el relay busca lo vencido. Solo indexa las respuestas con algo pendiente (casi nunca hay).
+MessageSchema.index({ 'outbox.nextAttemptAt': 1 }, { partialFilterExpression: { outbox: { $type: 'object' } } });
 
 export const Message = mongoose.model<IMessage>('Message', MessageSchema);
 

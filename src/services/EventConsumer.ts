@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import type { Channel, ChannelModel, ConsumeMessage } from 'amqplib';
+import type { Channel, ChannelModel, ConfirmChannel, ConsumeMessage } from 'amqplib';
 import { ChatService } from './ChatService';
 import { NotFoundError } from '../errors';
 import { PermissionService } from './PermissionService';
@@ -82,6 +82,8 @@ function suspendedIdentities(payload: EventPayload): string[] {
 export class EventConsumer {
   private static connection: ChannelModel | null = null;
   private static channel: Channel | null = null;
+  /** Para publicar con confirmación del broker (outbox): `publishConfirmed` sabe si RabbitMQ lo guardó. */
+  private static confirmChannel: ConfirmChannel | null = null;
   private static options: ResolvedOptions | null = null;
   private static stopped = true;
   private static attempts = 0;
@@ -409,6 +411,48 @@ export class EventConsumer {
     }
   }
 
+  /**
+   * Publica y espera la confirmación del broker (publisher confirms): true solo si RabbitMQ lo guardó. Lo usa el
+   * outbox de las respuestas de hilo (D3): mientras no sea true, el evento queda pendiente y se reintenta.
+   */
+  static publishConfirmed(
+    routingKey: string,
+    payload: Record<string, unknown>,
+    options: { exchange?: string; timeoutMs?: number } = {}
+  ): Promise<boolean> {
+    const channel = this.confirmChannel;
+    if (!channel) return Promise.resolve(false);
+    const exchange = options.exchange || this.options?.exchange || 'server.events';
+    const messageId = typeof payload.event_id === 'string' ? payload.event_id : crypto.randomUUID();
+
+    return new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => resolve(false), options.timeoutMs ?? 5000);
+      try {
+        channel.publish(
+          exchange,
+          routingKey,
+          Buffer.from(JSON.stringify(payload)),
+          {
+            persistent: true,
+            contentType: 'application/json',
+            messageId,
+            type: routingKey,
+            timestamp: Date.now(),
+            headers: { server_id: String(payload.server_id ?? '') },
+          },
+          (err) => {
+            clearTimeout(timer);
+            resolve(!err);
+          }
+        );
+      } catch (err) {
+        clearTimeout(timer);
+        (this.options?.logger ?? console).error({ err, routingKey }, 'Failed to publish event');
+        resolve(false);
+      }
+    });
+  }
+
   private static async connectLoop(): Promise<void> {
     const opts = this.options;
     if (!opts) return;
@@ -441,6 +485,7 @@ export class EventConsumer {
     conn.on('close', () => {
       this.connection = null;
       this.channel = null;
+      this.confirmChannel = null;
       if (this.stopped) return;
       // Corte inesperado (RabbitMQ reiniciado, red, nodo infra caído): volver a conectar
       opts.logger.warn('RabbitMQ connection closed, reconnecting');
@@ -484,6 +529,10 @@ export class EventConsumer {
 
       this.connection = conn;
       this.channel = channel;
+      // Los tests con una conexión falsa pueden no tenerlo: sin canal de confirmación, publishConfirmed da false
+      if (typeof conn.createConfirmChannel === 'function') {
+        this.confirmChannel = await conn.createConfirmChannel();
+      }
     } catch (err) {
       // Falló el armado del canal: cerrar sin disparar la reconexión del handler de close
       conn.removeAllListeners('close');
@@ -500,6 +549,10 @@ export class EventConsumer {
     }
     this.wakeRetry?.(); // si estaba esperando para reintentar, el bucle ve stopped y termina
     this.clearAllTimers();
+    if (this.confirmChannel) {
+      await this.confirmChannel.close().catch(() => undefined);
+      this.confirmChannel = null;
+    }
     if (this.channel) {
       try {
         await this.channel.close();

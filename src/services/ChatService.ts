@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import mongoose from 'mongoose';
-import { Message, IMessage, SystemEvent } from '../models/Message';
+import { Message, IMessage, IThreadOutbox, SystemEvent } from '../models/Message';
 import { ReadState } from '../models/ReadState';
 import { ChannelAccessResult, PermissionService } from './PermissionService';
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from '../errors';
@@ -66,6 +66,24 @@ export interface ThreadSummaryPayload {
   lastReplyAt: Date;
   lastReplyId: string;
   participantIds: string[];
+}
+
+/**
+ * Cuánto espera el relay antes de tomar algo del outbox: lo normal es que ThreadService lo complete en el
+ * momento, y así no lo hacen los dos a la vez.
+ */
+export const OUTBOX_GRACE_MS = 15_000;
+
+/**
+ * El resumen del raíz ya refleja esta respuesta: se saca la marca y, si no queda nada pendiente, el outbox
+ * entero (el índice parcial deja de verla).
+ */
+export async function clearSummaryPending(replyId: mongoose.Types.ObjectId): Promise<void> {
+  await Message.updateOne({ _id: replyId }, { $unset: { 'outbox.summaryPending': 1 } });
+  await Message.updateOne(
+    { _id: replyId, 'outbox.eventId': { $exists: false }, 'outbox.summaryPending': { $exists: false } },
+    { $unset: { outbox: 1 } }
+  );
 }
 
 /** Máximo de mensajes fijados por canal o DM. */
@@ -319,7 +337,7 @@ export class ChatService {
    * @param authorId User sending the message
    * @param channelId Target channel identifier
    * @param content Text body of the message
-   * @param threadParentId Raíz del hilo si es una respuesta (lo valida ThreadService antes de llamar)
+   * @param thread Raíz del hilo y lo que queda pendiente, si es una respuesta (lo arma ThreadService)
    * @throws UpstreamUnavailableError si hay que validar @everyone o un rol y Core no responde
    */
   static async sendMessage(
@@ -328,7 +346,7 @@ export class ChatService {
     content: string,
     attachmentsOrSkip?: MessageAttachmentPayload[] | boolean,
     skipCheck = false,
-    threadParentId?: mongoose.Types.ObjectId
+    thread?: { parentId: mongoose.Types.ObjectId; outbox: IThreadOutbox }
   ): Promise<MessagePayload> {
     const attachments = Array.isArray(attachmentsOrSkip) ? attachmentsOrSkip : undefined;
     const skipPermissionCheck = typeof attachmentsOrSkip === 'boolean' ? attachmentsOrSkip : skipCheck;
@@ -362,7 +380,8 @@ export class ChatService {
       ...(roleIds.length > 0 ? { mentionRoleIds: roleIds } : {}),
       ...(everyone ? { mentionEveryone: true } : {}),
       ...(attachments && attachments.length > 0 ? { attachments } : {}),
-      ...(threadParentId ? { threadParentId } : {}),
+      // La respuesta y su outbox en el mismo documento: se guardan juntos o no se guarda ninguno
+      ...(thread ? { threadParentId: thread.parentId, outbox: thread.outbox } : {}),
     });
 
     await messageDocument.validate();
@@ -559,6 +578,17 @@ export class ChatService {
     message.pinned = false;
     message.pinnedAt = null;
     message.pinnedBy = null;
+    // Respuesta de hilo: queda anotado en el mismo guardado que falta restar del contador (D4). Si el proceso se
+    // cae antes de restar, ThreadOutbox recuenta el hilo.
+    if (message.threadParentId) {
+      message.outbox = {
+        ...(message.outbox ? { eventId: message.outbox.eventId } : {}),
+        summaryPending: true,
+        serverId: message.outbox?.serverId ?? serverId ?? '',
+        attempts: 0,
+        nextAttemptAt: new Date(Date.now() + OUTBOX_GRACE_MS),
+      };
+    }
 
     await message.save();
 
@@ -568,6 +598,7 @@ export class ChatService {
         { _id: message.threadParentId, 'thread.replyCount': { $gt: 0 } },
         { $inc: { 'thread.replyCount': -1 } }
       );
+      await clearSummaryPending(message._id as mongoose.Types.ObjectId);
     }
 
     // Audit Log: Si un moderador elimina el mensaje de otro usuario en un servidor
