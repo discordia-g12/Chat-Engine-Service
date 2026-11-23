@@ -84,11 +84,13 @@ export class ThreadOutbox {
     }
     const existing = root.thread?.participantIds ?? [];
     const participantIds = [...new Set([...existing, root.authorId, ...authors])].slice(0, MAX_THREAD_PARTICIPANTS);
+    // Los que ya estaban primero, para no cambiar el orden de las fotos
+    const replierIds = [...new Set([...(root.thread?.replierIds ?? []), ...authors])].slice(0, MAX_THREAD_PARTICIPANTS);
     await Message.updateOne(
       { _id: rootId },
       {
         $set: {
-          thread: { replyCount, lastReplyAt: last.createdAt, lastReplyId: last._id, participantIds },
+          thread: { replyCount, lastReplyAt: last.createdAt, lastReplyId: last._id, participantIds, replierIds },
         },
       }
     );

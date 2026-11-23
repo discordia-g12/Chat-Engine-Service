@@ -179,6 +179,47 @@ describe('History and Reconnection', () => {
     assert.strictEqual(res.json().title, 'Not Found');
   });
 
+  describe('responder citando', () => {
+    const quoteChannel = 'channel-quote';
+    const post = (payload: object) =>
+      app.inject({ method: 'POST', url: `/channels/${quoteChannel}/messages`, headers: { 'x-user-id': 'bob' }, payload });
+
+    it('guarda la cita y la devuelve en el historial', async () => {
+      const parent = await Message.create({ content: 'mensaje padre', authorId: 'alice', channelId: quoteChannel });
+
+      const res = await post({ content: 'mensaje respuesta', replyToId: parent.id });
+      assert.strictEqual(res.statusCode, 201);
+      assert.deepStrictEqual(res.json().replyTo, { id: parent.id, authorId: 'alice', content: 'mensaje padre' });
+
+      const history = await ChatService.getHistory(quoteChannel);
+      assert.deepStrictEqual(history.at(-1)?.replyTo, { id: parent.id, authorId: 'alice', content: 'mensaje padre' });
+    });
+
+    it('rechaza citar un id inválido, un mensaje de otro canal o uno borrado', async () => {
+      const elsewhere = await Message.create({ content: 'otro canal', authorId: 'alice', channelId: 'channel-other' });
+      const deleted = await Message.create({ content: '', authorId: 'alice', channelId: quoteChannel, isDeleted: true });
+
+      assert.strictEqual((await post({ content: 'x', replyToId: 'nope' })).statusCode, 400);
+      assert.strictEqual((await post({ content: 'x', replyToId: elsewhere.id })).statusCode, 404);
+      assert.strictEqual((await post({ content: 'x', replyToId: deleted.id })).statusCode, 404);
+    });
+
+    it('al editar o borrar el original, la cita se actualiza', async () => {
+      const parent = await Message.create({ content: 'antes', authorId: 'alice', channelId: quoteChannel });
+      const quote = (await post({ content: 'respuesta', replyToId: parent.id })).json();
+
+      await ChatService.editMessage('alice', quoteChannel, parent.id, 'después');
+      assert.strictEqual((await Message.findById(quote.id).lean())?.replyTo?.content, 'después');
+
+      await ChatService.deleteMessage('alice', quoteChannel, parent.id);
+      const reloaded = await Message.findById(quote.id).lean<IMessage>();
+      assert.deepStrictEqual(
+        { content: reloaded?.replyTo?.content, deleted: reloaded?.replyTo?.deleted },
+        { content: '', deleted: true }
+      );
+    });
+  });
+
   it('Should load history with pagination in chronological order', async () => {
     const res = await app.inject({
       method: 'GET',

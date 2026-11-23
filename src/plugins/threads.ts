@@ -26,9 +26,10 @@ export default async function threadsPlugin(app: FastifyInstance) {
     }
 
     const { channelId, messageId } = req.params as ThreadParams;
-    const { content = '', attachments } = (req.body || {}) as {
+    const { content = '', attachments, replyToId } = (req.body || {}) as {
       content?: string;
       attachments?: MessageAttachmentPayload[];
+      replyToId?: string;
     };
 
     const { reply: saved } = await ThreadService.createReply(
@@ -38,7 +39,8 @@ export default async function threadsPlugin(app: FastifyInstance) {
       content,
       attachments,
       req.serverId ?? '',
-      req.log
+      req.log,
+      replyToId
     );
     reply.status(201);
     return saved;

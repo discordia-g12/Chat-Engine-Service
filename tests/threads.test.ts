@@ -164,6 +164,32 @@ describe('Threads (GET|POST /channels/:channelId/messages/:messageId/thread)', (
       assert.strictEqual(inboxEvents.length, 0);
     });
 
+    it('replierIds tiene solo a quienes respondieron, sin el autor del raíz ni los mencionados', async () => {
+      const parent = await root('alice');
+
+      await reply(channelId, parent.id, 'bob', { content: 'hola <@carol>' });
+      let dbRoot = await Message.findById(parent._id).lean();
+      assert.deepStrictEqual(dbRoot?.thread?.replierIds, ['bob']);
+
+      await reply(channelId, parent.id, 'alice');
+      await reply(channelId, parent.id, 'bob');
+      dbRoot = await Message.findById(parent._id).lean();
+      assert.deepStrictEqual(dbRoot?.thread?.replierIds, ['bob', 'alice']);
+      assert.deepStrictEqual((await getThread(channelId, parent.id)).json().parent.thread.replierIds, ['bob', 'alice']);
+    });
+
+    it('una respuesta del hilo puede citar otra del mismo hilo, no un mensaje del canal', async () => {
+      const parent = await root();
+      const first = (await reply(channelId, parent.id, 'bob', { content: 'primera' })).json();
+      const other = await root('carol');
+
+      const quoted = await reply(channelId, parent.id, 'alice', { content: 'sí', replyToId: first.id });
+      assert.strictEqual(quoted.statusCode, 201);
+      assert.deepStrictEqual(quoted.json().replyTo, { id: first.id, authorId: 'bob', content: 'primera' });
+
+      assert.strictEqual((await reply(channelId, parent.id, 'alice', { content: 'x', replyToId: other.id })).statusCode, 400);
+    });
+
     it('acepta respuestas sobre un raíz borrado: el hilo no se pierde', async () => {
       const parent = await root();
       await Message.updateOne({ _id: parent._id }, { isDeleted: true, content: '' });

@@ -26,6 +26,19 @@ export interface IThreadSummary {
   lastReplyId: mongoose.Types.ObjectId;
   /** Autor del raíz, quienes respondieron y los mencionados, con tope MAX_THREAD_PARTICIPANTS. */
   participantIds: string[];
+  /** Solo quienes respondieron, en orden de primera respuesta (las fotos del resumen). Mismo tope. */
+  replierIds?: string[];
+}
+
+/**
+ * Copia del mensaje al que responde (responder citando, no un hilo). Se guarda con la respuesta para no
+ * buscarlo en cada lectura; si el original se edita o se borra, ChatService actualiza las copias.
+ */
+export interface IReplyTo {
+  id: mongoose.Types.ObjectId;
+  authorId: string;
+  content: string;
+  deleted?: boolean;
 }
 
 /**
@@ -72,6 +85,8 @@ export interface IMessage extends Document {
   thread?: IThreadSummary;
   /** Solo en una respuesta con algo pendiente (ver IThreadOutbox). */
   outbox?: IThreadOutbox;
+  /** Mensaje citado, si responde a uno. */
+  replyTo?: IReplyTo;
 }
 
 const AttachmentSchema = new Schema({
@@ -94,6 +109,14 @@ const ThreadSummarySchema = new Schema({
   lastReplyAt: { type: Date, required: true },
   lastReplyId: { type: Schema.Types.ObjectId, required: true },
   participantIds: { type: [String], default: [] },
+  replierIds: { type: [String], default: undefined },
+}, { _id: false });
+
+const ReplyToSchema = new Schema({
+  id: { type: Schema.Types.ObjectId, required: true },
+  authorId: { type: String, required: true },
+  content: { type: String, default: '' },
+  deleted: { type: Boolean, default: undefined },
 }, { _id: false });
 
 const ThreadOutboxSchema = new Schema({
@@ -170,6 +193,7 @@ const MessageSchema: Schema = new Schema({
   threadParentId: { type: Schema.Types.ObjectId, default: undefined },
   thread: { type: ThreadSummarySchema, default: undefined },
   outbox: { type: ThreadOutboxSchema, default: undefined },
+  replyTo: { type: ReplyToSchema, default: undefined },
 }, {
   strict: true,
 });
@@ -187,6 +211,8 @@ MessageSchema.index({ sourceEventId: 1 }, { unique: true, partialFilterExpressio
 MessageSchema.index({ threadParentId: 1, _id: 1 }, { partialFilterExpression: { threadParentId: { $type: 'objectId' } } });
 
 // Outbox de los hilos: el relay busca lo vencido. Solo indexa las respuestas con algo pendiente (casi nunca hay).
+// Para actualizar las citas cuando el original se edita o se borra
+MessageSchema.index({ 'replyTo.id': 1 }, { partialFilterExpression: { replyTo: { $type: 'object' } } });
 MessageSchema.index({ 'outbox.nextAttemptAt': 1 }, { partialFilterExpression: { outbox: { $type: 'object' } } });
 
 export const Message = mongoose.model<IMessage>('Message', MessageSchema);

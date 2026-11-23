@@ -246,7 +246,8 @@ export class ConversationService {
     userId: string,
     channelId: string,
     content: string,
-    attachments?: MessageAttachmentPayload[]
+    attachments?: MessageAttachmentPayload[],
+    replyToId?: string
   ): Promise<MessagePayload> {
     const { conversation, reopens } = await this.checkSend(userId, channelId);
     const files = Array.isArray(attachments) ? attachments : undefined;
@@ -258,7 +259,7 @@ export class ConversationService {
       current = await this.markAccepted(conversation);
     }
 
-    const { message } = await this.deliver(current, userId, content, files);
+    const { message } = await this.deliver(current, userId, content, files, false, replyToId);
     return message;
   }
 
@@ -358,10 +359,11 @@ export class ConversationService {
     authorId: string,
     content: string,
     attachments?: MessageAttachmentPayload[],
-    isNew = false
+    isNew = false,
+    replyToId?: string
   ): Promise<{ conversation: IConversation; message: MessagePayload }> {
     const channelId = toDmChannelId(conversation._id);
-    const message = await ChatService.sendMessage(authorId, channelId, content, attachments, true);
+    const message = await ChatService.sendMessage(authorId, channelId, content, attachments, true, undefined, replyToId);
 
     const messageId = new Types.ObjectId(message.id);
     // Con mensajes simultáneos gana el último: sin esta condición, el resumen podría quedar en uno anterior

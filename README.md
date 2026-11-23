@@ -114,12 +114,17 @@ En producción está detrás de Kong, bajo `/api/v1/chat` (Kong saca ese prefijo
 - `GET /channels/:channelId/messages/:messageId/thread?after=&limit=`: hilo de un mensaje (canal o DM):
   `{ parent, replies, hasMore, nextCursor }`. `parent` es el raíz, también si está borrado. Las respuestas van
   de la más vieja a la más nueva, 50 por página (hasta 100); `nextCursor` es el `after` de la siguiente. Ver ADR-07.
-- `POST /channels/:channelId/messages/:messageId/thread` con `{ content, attachments? }`: responde en el hilo
+- Responder citando: `replyToId` en el body de `POST /channels/:channelId/messages`, del POST del hilo o en el
+  mensaje del WebSocket. Se guarda una copia del citado y el mensaje la trae como
+  `replyTo: { id, authorId, content, deleted? }`; editar o borrar el original actualiza las copias. Tiene que ser
+  de la misma conversación (en el canal, un mensaje del canal; en un hilo, el raíz o una respuesta): `400` si no,
+  `404` si no existe o está borrado.
+- `POST /channels/:channelId/messages/:messageId/thread` con `{ content, attachments?, replyToId? }`: responde en el hilo
   (`201` con la respuesta, que trae `threadParentId`). Mismo permiso que escribir en el canal. `400` con
   `code: THREAD_NESTED` si el mensaje ya es una respuesta (un solo nivel), `404` si no es de ese canal. Por el
   WebSocket del canal: `{"content": "...", "threadParentId": "<id del raíz>"}`. Las respuestas no aparecen en
   el historial ni en la reconexión del canal, y no cuentan como no leídos; el raíz trae
-  `thread: { replyCount, lastReplyAt, lastReplyId, participantIds }`.
+  `thread: { replyCount, lastReplyAt, lastReplyId, participantIds, replierIds }`.
 - `GET /unread`: canales con mensajes sin leer, con `unreadCount` y `mentionCount` (hasta 100 cada uno). Ver
   ADR-02 y ADR-03.
 - `POST /channels/:channelId/read`: marca el canal leído hasta `messageId` (body opcional) o hasta el

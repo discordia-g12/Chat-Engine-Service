@@ -118,7 +118,8 @@ export default async function websocketPlugin(app: FastifyInstance, opts: Websoc
                 data.content || '',
                 data.attachments,
                 serverId,
-                req.log
+                req.log,
+                data.replyToId
               );
               return;
             }
@@ -130,7 +131,8 @@ export default async function websocketPlugin(app: FastifyInstance, opts: Websoc
                 userId,
                 channelId,
                 data.content || '',
-                data.attachments
+                data.attachments,
+                data.replyToId
               );
             } else {
               if (!SessionManager.canSend(connection)) {
@@ -142,7 +144,9 @@ export default async function websocketPlugin(app: FastifyInstance, opts: Websoc
                 channelId,
                 data.content || '',
                 data.attachments,
-                true
+                true,
+                undefined,
+                data.replyToId
               );
 
               await PubSubService.publish(channelId, savedPayload);

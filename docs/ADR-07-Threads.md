@@ -25,10 +25,11 @@ Restricciones que condicionan el diseño:
   cliente sepa a qué caché va. No se fija (`400`): los fijados son del canal.
 * **Fuera del canal.** El historial, la reconexión y los no leídos filtran `threadParentId: { $exists: false }`
   (`NOT_A_THREAD_REPLY`). La búsqueda sí las incluye, con `threadParentId` para abrir el hilo.
-* **Resumen en el raíz:** `thread: { replyCount, lastReplyAt, lastReplyId, participantIds }`, actualizado con un
+* **Resumen en el raíz:** `thread: { replyCount, lastReplyAt, lastReplyId, participantIds, replierIds }`, actualizado con un
   solo `findOneAndUpdate` de pipeline (atómico): suma uno, `$max` para la última respuesta y participantes sin
   repetir. Los participantes son el autor del raíz, quienes respondieron y los mencionados, con tope de 100: al
-  llegar al tope se conservan los que estaban. Borrar una respuesta resta uno (solo la primera vez) y se publica
+  llegar al tope se conservan los que estaban. `replierIds` son solo quienes respondieron, en orden de primera
+  respuesta (las fotos del resumen; los hilos anteriores lo completan con la próxima respuesta). Borrar una respuesta resta uno (solo la primera vez) y se publica
   el raíz como `MESSAGE_UPDATED`. Un raíz borrado conserva el hilo.
 * **Rutas**, detrás de `channelAccessGuard`:
   * `GET /channels/:channelId/messages/:messageId/thread?after=&limit=`: `{ parent, replies, hasMore,

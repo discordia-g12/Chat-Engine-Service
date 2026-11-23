@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import mongoose from 'mongoose';
-import { Message, IMessage, IThreadOutbox, SystemEvent } from '../models/Message';
+import { Message, IMessage, IReplyTo, IThreadOutbox, SystemEvent } from '../models/Message';
 import { ReadState } from '../models/ReadState';
 import { ChannelAccessResult, PermissionService } from './PermissionService';
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from '../errors';
@@ -59,6 +59,8 @@ export interface MessagePayload {
   threadParentId?: string;
   /** Raíz de un hilo: cuántas respuestas tiene y cuándo fue la última. */
   thread?: ThreadSummaryPayload;
+  /** Mensaje citado (responder citando). `deleted`: el original se borró y ya no tiene texto. */
+  replyTo?: { id: string; authorId: string; content: string; deleted?: boolean };
 }
 
 export interface ThreadSummaryPayload {
@@ -66,6 +68,42 @@ export interface ThreadSummaryPayload {
   lastReplyAt: Date;
   lastReplyId: string;
   participantIds: string[];
+  replierIds: string[];
+}
+
+/** Largo de la copia del texto citado: alcanza para la vista previa de una línea. */
+export const REPLY_PREVIEW_MAX_LENGTH = 200;
+
+/**
+ * Copia del mensaje al que se responde. Tiene que estar en el mismo canal y en la misma conversación: en el
+ * chat principal, un mensaje del canal; en un hilo, el raíz o una de sus respuestas. Ni borrado ni del sistema.
+ *
+ * @throws ValidationError si el id no es válido o el mensaje está en otra conversación
+ * @throws NotFoundError si no existe en el canal o está borrado
+ */
+async function resolveReplyTo(
+  channelId: string,
+  replyToId: unknown,
+  threadParentId?: mongoose.Types.ObjectId
+): Promise<IReplyTo> {
+  if (!isObjectIdString(replyToId)) {
+    throw new ValidationError('replyToId must be a message id');
+  }
+  const target = await Message.findOne(
+    { _id: replyToId, channelId, isDeleted: { $ne: true }, systemEvent: { $exists: false } },
+    { authorId: 1, content: 1, threadParentId: 1 }
+  ).lean<IMessage>();
+  if (!target) {
+    throw new NotFoundError('The message being replied to does not exist');
+  }
+  const targetId = target._id as mongoose.Types.ObjectId;
+  const sameConversation = threadParentId
+    ? targetId.equals(threadParentId) || target.threadParentId?.equals(threadParentId) === true
+    : !target.threadParentId;
+  if (!sameConversation) {
+    throw new ValidationError('Cannot reply to a message from another conversation');
+  }
+  return { id: targetId, authorId: target.authorId, content: (target.content ?? '').slice(0, REPLY_PREVIEW_MAX_LENGTH) };
 }
 
 /**
@@ -230,6 +268,17 @@ export function toPayload(msg: IMessage): MessagePayload {
             lastReplyAt: msg.thread.lastReplyAt,
             lastReplyId: msg.thread.lastReplyId.toString(),
             participantIds: msg.thread.participantIds ?? [],
+            replierIds: msg.thread.replierIds ?? [],
+          },
+        }
+      : {}),
+    ...(msg.replyTo && !isDeleted
+      ? {
+          replyTo: {
+            id: msg.replyTo.id.toString(),
+            authorId: msg.replyTo.authorId,
+            content: msg.replyTo.content ?? '',
+            ...(msg.replyTo.deleted ? { deleted: true } : {}),
           },
         }
       : {}),
@@ -357,6 +406,7 @@ export class ChatService {
    * @param channelId Target channel identifier
    * @param content Text body of the message
    * @param thread Raíz del hilo y lo que queda pendiente, si es una respuesta (lo arma ThreadService)
+   * @param replyToId Mensaje que cita (responder citando), ver resolveReplyTo
    * @throws UpstreamUnavailableError si hay que validar @everyone o un rol y Core no responde
    */
   static async sendMessage(
@@ -365,7 +415,8 @@ export class ChatService {
     content: string,
     attachmentsOrSkip?: MessageAttachmentPayload[] | boolean,
     skipCheck = false,
-    thread?: { parentId: mongoose.Types.ObjectId; outbox: IThreadOutbox }
+    thread?: { parentId: mongoose.Types.ObjectId; outbox: IThreadOutbox },
+    replyToId?: string
   ): Promise<MessagePayload> {
     const attachments = Array.isArray(attachmentsOrSkip) ? attachmentsOrSkip : undefined;
     const skipPermissionCheck = typeof attachmentsOrSkip === 'boolean' ? attachmentsOrSkip : skipCheck;
@@ -377,6 +428,8 @@ export class ChatService {
         throw new ForbiddenError('User does not have permission to send messages in this channel');
       }
     }
+
+    const replyTo = replyToId == null ? undefined : await resolveReplyTo(channelId, replyToId, thread?.parentId);
 
     const parsed = parseMentions(content);
     let roleIds: string[] = [];
@@ -401,6 +454,7 @@ export class ChatService {
       ...(attachments && attachments.length > 0 ? { attachments } : {}),
       // La respuesta y su outbox en el mismo documento: se guardan juntos o no se guarda ninguno
       ...(thread ? { threadParentId: thread.parentId, outbox: thread.outbox } : {}),
+      ...(replyTo ? { replyTo } : {}),
     });
 
     await messageDocument.validate();
@@ -526,6 +580,10 @@ export class ChatService {
     message.mentionEveryone = everyone ? true : undefined;
 
     await message.save();
+    await Message.updateMany(
+      { 'replyTo.id': message._id },
+      { $set: { 'replyTo.content': trimmed.slice(0, REPLY_PREVIEW_MAX_LENGTH) } }
+    );
 
     const payload = toPayload(message);
     return {
@@ -610,6 +668,8 @@ export class ChatService {
     }
 
     await message.save();
+    // Las citas no siguen mostrando el texto de un mensaje borrado
+    await Message.updateMany({ 'replyTo.id': message._id }, { $set: { 'replyTo.content': '', 'replyTo.deleted': true } });
 
     // El contador del raíz cuenta solo respuestas visibles. Solo acá: un segundo DELETE sale antes, sin restar.
     if (message.threadParentId) {

@@ -82,6 +82,8 @@ async function addReplyToSummary(rootId: mongoose.Types.ObjectId, reply: Message
   const existing = { $ifNull: ['$thread.participantIds', []] };
   // $literal: un id mencionado puede empezar con '$' (`<@$x>`) y el pipeline lo leería como un campo
   const incoming = { $literal: [...new Set(participants)] };
+  const repliers = { $ifNull: ['$thread.replierIds', []] };
+  const author = { $literal: [reply.authorId] };
   return Message.findOneAndUpdate(
     { _id: rootId },
     [
@@ -96,6 +98,9 @@ async function addReplyToSummary(rootId: mongoose.Types.ObjectId, reply: Message
                 { $concatArrays: [existing, { $setDifference: [incoming, existing] }] },
                 MAX_THREAD_PARTICIPANTS,
               ],
+            },
+            replierIds: {
+              $slice: [{ $concatArrays: [repliers, { $setDifference: [author, repliers] }] }, MAX_THREAD_PARTICIPANTS],
             },
           },
         },
@@ -160,7 +165,8 @@ export class ThreadService {
     content: string,
     attachments: MessageAttachmentPayload[] | undefined,
     serverId: string,
-    logger: Logger = console
+    logger: Logger = console,
+    replyToId?: string
   ): Promise<ThreadReplyResult> {
     const isDm = isDmChannel(channelId);
     const conversation = isDm ? await ConversationService.assertCanReplyInThread(authorId, channelId) : null;
@@ -176,10 +182,15 @@ export class ThreadService {
       attempts: 0,
       nextAttemptAt: new Date(Date.now() + OUTBOX_GRACE_MS),
     };
-    const reply = await ChatService.sendMessage(authorId, channelId, content, files, true, {
-      parentId: root._id,
-      outbox,
-    });
+    const reply = await ChatService.sendMessage(
+      authorId,
+      channelId,
+      content,
+      files,
+      true,
+      { parentId: root._id, outbox },
+      replyToId
+    );
     const replyId = new mongoose.Types.ObjectId(reply.id);
 
     const updated = await addReplyToSummary(root._id, reply, [root.authorId, authorId, ...reply.mentions.users]);
