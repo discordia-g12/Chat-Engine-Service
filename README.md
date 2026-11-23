@@ -96,12 +96,14 @@ En producción está detrás de Kong, bajo `/api/v1/chat` (Kong saca ese prefijo
 
 - `GET /channels/:channelId/ws?last_message_id_seen=`: WebSocket del canal. El cliente manda
   `{"content": "..."}` y recibe cada mensaje nuevo del canal. Al reconectar con `last_message_id_seen`,
-  recibe los posteriores a ese mensaje.
+  recibe los posteriores a ese mensaje (como mucho los 100 más recientes; el resto, con el historial). Un id
+  que no es un ObjectId no repone nada.
 - Menciones en el texto: `<@userId>`, `<@&roleId>` y `@everyone`. Las de rol y `@everyone` exigen
   `MENTION_EVERYONE`; sin ese permiso quedan como texto. Cada mensaje trae en `mentions` las que notifican.
   Ver ADR-03.
-- `GET /channels/:channelId/messages?limit=&before=`: historial en orden cronológico (50 por defecto).
-  `before` es el id del mensaje más viejo que ya tiene el cliente, para cargar los anteriores.
+- `GET /channels/:channelId/messages?limit=&before=`: historial en orden cronológico (50 por defecto, hasta 100).
+  `before` es el id del mensaje más viejo que ya tiene el cliente, para cargar los anteriores. `400` si `limit`
+  no es un entero entre 1 y 100 o `before` no es un id de mensaje.
 - `GET /servers/:serverId/messages/search?q=&authorId=&limit=&before=`: busca mensajes del servidor por
   texto (`q`, sin distinguir mayúsculas ni tildes), por autor (`authorId`) o las dos cosas, solo en los
   canales que el usuario puede ver. Del más nuevo al más viejo, 25 por página (hasta 50):
@@ -110,6 +112,20 @@ En producción está detrás de Kong, bajo `/api/v1/chat` (Kong saca ese prefijo
 - `GET /channels/:channelId/messages/search?q=&authorId=&limit=&before=`: la misma búsqueda dentro de un solo
   canal o DM (`dm-…`), con el acceso del historial: participante en un DM, `VIEW_CHANNELS` en un canal. En un
   DM, un `authorId` igual al `X-User-Id` de quien busca se toma como su id canónico. Ver ADR-04.
+- `GET /channels/:channelId/messages/:messageId/thread?after=&limit=`: hilo de un mensaje (canal o DM):
+  `{ parent, replies, hasMore, nextCursor }`. `parent` es el raíz, también si está borrado. Las respuestas van
+  de la más vieja a la más nueva, 50 por página (hasta 100); `nextCursor` es el `after` de la siguiente. Ver ADR-07.
+- Responder citando: `replyToId` en el body de `POST /channels/:channelId/messages`, del POST del hilo o en el
+  mensaje del WebSocket. Se guarda una copia del citado y el mensaje la trae como
+  `replyTo: { id, authorId, content, deleted? }`; editar o borrar el original actualiza las copias. Tiene que ser
+  de la misma conversación (en el canal, un mensaje del canal; en un hilo, el raíz o una respuesta): `400` si no,
+  `404` si no existe o está borrado.
+- `POST /channels/:channelId/messages/:messageId/thread` con `{ content, attachments?, replyToId? }`: responde en el hilo
+  (`201` con la respuesta, que trae `threadParentId`). Mismo permiso que escribir en el canal. `400` con
+  `code: THREAD_NESTED` si el mensaje ya es una respuesta (un solo nivel), `404` si no es de ese canal. Por el
+  WebSocket del canal: `{"content": "...", "threadParentId": "<id del raíz>"}`. Las respuestas no aparecen en
+  el historial ni en la reconexión del canal, y no cuentan como no leídos; el raíz trae
+  `thread: { replyCount, lastReplyAt, lastReplyId, participantIds, replierIds }`.
 - `GET /unread`: canales con mensajes sin leer, con `unreadCount` y `mentionCount` (hasta 100 cada uno). Ver
   ADR-02 y ADR-03.
 - `POST /channels/:channelId/read`: marca el canal leído hasta `messageId` (body opcional) o hasta el
@@ -163,7 +179,8 @@ nodo (realtime) y es el dueño de la llamada: Chat solo dice quién puede llamar
 - `POST /internal/inbox/events` con `{ userIds, event }` y el header `X-Internal-Token` (ver
   `INTERNAL_API_TOKEN`; `401` si falta o no coincide): publica `event` tal cual en el inbox de cada usuario
   (`inbox:<id>`) y responde `202`. `userIds`: de 1 a 10 ids no vacíos (los repetidos reciben uno solo).
-  `event.type` tiene que empezar con `CALL_` (`400` si no): el resto de los eventos los publica Chat. `413` si
+  `event.type` tiene que empezar con `CALL_` (Voice) o `NOTIFICATION_` (Notification, ADR 0017; `400` si no):
+  el resto de los eventos los publica Chat. `413` si
   `event` pasa los 8 KB.
 
 Los errores siguen RFC 7807 (`application/problem+json`): `400` datos inválidos, `401` sin usuario, `403`
@@ -229,6 +246,7 @@ anterior). Si una instancia se cae, sus claves vencen sin aviso: el cliente lo v
 
 | Mensaje o cierre | Cuándo |
 |---|---|
+| `{"type":"THREAD_REPLY_CREATED","parentId","reply","thread"}` | Alguien respondió en un hilo del canal. `thread` es el resumen nuevo del raíz. En un DM llega además por el inbox como `DM_THREAD_REPLY_CREATED`. Editar, borrar o reaccionar a una respuesta usa los `MESSAGE_*` de siempre, con `threadParentId` en el mensaje |
 | `{"type":"PERMISSIONS_UPDATED","canSend":false}` | Al conectar, si el usuario puede leer pero no escribir (silenciado o sin `SEND_MESSAGES`), y cada vez que eso cambia |
 | Cierre `4003` | Lo banearon del servidor (`member.banned`) |
 | Cierre `4002` | Lo expulsaron o abandonó el servidor (`member.kicked`, `member.left`) |
@@ -261,6 +279,19 @@ Cola `chat_engine_events`, enlazada a `member.*`, `role.*`, `server.deleted`, `s
 - `server.updated`: pide los miembros a Server-Roles (`/internal/servers/{id}/member-ids`) y les manda
   `SERVER_UPDATED` por el inbox. Si Server-Roles no responde, el aviso se descarta.
 
+### Eventos que publica
+
+En el exchange `server.events`:
+
+- `message.deleted_by_moderator`: un moderador borró el mensaje de otro (auditoría en Notification-Audit-Metrics).
+- `chat.message.created`: una respuesta de hilo con participantes para avisar (ADR-07 y ADR 0017 de la
+  organización). Lleva `server_id` (`null` en un DM), `channel_id`, `thread_id`, `message_id`, `author_id`,
+  `thread_participant_ids` (sin el autor y sin quienes ya no son miembros), `mention_user_ids`,
+  `mention_role_ids`, `mention_everyone`, `is_dm`, `preview` (140 caracteres) y `created_at`. Sale después de
+  guardar la respuesta, con confirmación de RabbitMQ. Lo que no se confirmó (RabbitMQ o Server-Roles caídos, o el
+  proceso cayéndose en el medio) queda en el outbox de la propia respuesta y lo reintenta `ThreadOutbox` cada 10 s,
+  con el mismo `event_id`. Ver ADR-07.
+
 Si RabbitMQ no está al arrancar, el consumidor reintenta solo (de 1 a 30 s) sin bloquear el servicio.
 
 ## Tests, lint y seguridad
@@ -285,11 +316,14 @@ src/
 ├── app.ts                     app de Fastify, /livez y /readyz
 ├── plugins/websocket.ts       WebSocket del canal
 ├── plugins/history.ts         historial
+├── plugins/threads.ts         hilos de un mensaje
 ├── plugins/conversations.ts   conversaciones directas y presencia
 ├── plugins/internalMetrics.ts /internal/metrics/messages (backoffice)
 ├── plugins/internalCalls.ts   /internal para las llamadas privadas (Voice-Signaling)
 ├── plugins/errorHandler.ts    errores RFC 7807
 ├── services/ChatService.ts    guardar mensajes, historial y mensajes perdidos
+├── services/ThreadService.ts  respuestas de hilo y resumen del raíz
+├── services/ThreadOutbox.ts   outbox de los hilos: aviso a Notification y recuento si algo quedó a medias
 ├── services/SessionManager.ts sesiones abiertas por canal y usuario (en memoria)
 ├── services/PubSubService.ts   distribución de mensajes multi-nodo (Redis Pub/Sub)
 ├── services/PermissionService.ts  consulta a Server-Roles
@@ -320,6 +354,10 @@ tests/
 | [ADR-01](docs/ADR-01-CI-CD-Pipeline.md) | Pipeline de CI/CD |
 | [ADR-02](docs/ADR-02-Read-States.md) | Estado de lectura y no leídos por canal |
 | [ADR-03](docs/ADR-03-Mentions.md) | Menciones de usuario, de rol y @everyone |
+| [ADR-04](docs/ADR-04-Message-Search.md) | Búsqueda de mensajes |
+| [ADR-05](docs/ADR-05-Pinned-Messages.md) | Mensajes fijados |
+| [ADR-06](docs/ADR-06-Presence.md) | Presencia |
+| [ADR-07](docs/ADR-07-Threads.md) | Hilos de conversación |
 
 Escalabilidad multi-nodo: implementada con Redis Pub/Sub (`channel:{channel_id}`) según ADR 0006 y el issue #7.
 Cada réplica se suscribe a los canales activos y distribuye los mensajes entre pods sin duplicar envíos.

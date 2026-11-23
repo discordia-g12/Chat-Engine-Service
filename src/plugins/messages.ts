@@ -4,6 +4,7 @@ import { ChatService, MessagePayload } from '../services/ChatService';
 import { channelAccessGuard } from '../helpers/auth';
 import { ForbiddenError } from '../errors';
 import { PubSubService } from '../services/PubSubService';
+import { ThreadService } from '../services/ThreadService';
 import { isDmChannel, parseDmChannelId } from '../helpers/directMessages';
 import { Conversation, IConversation } from '../models/Conversation';
 
@@ -64,6 +65,10 @@ export default async function messagesPlugin(app: FastifyInstance) {
       reason
     );
     await PubSubService.publish(channelId, deletedPayload);
+    // El raíz cambió de contador: los clientes lo mergean como cualquier MESSAGE_UPDATED
+    if (deletedPayload.threadParentId) {
+      await ThreadService.publishSummary(channelId, deletedPayload.threadParentId);
+    }
 
     const conv = await findDmConversation(channelId);
     if (conv) {

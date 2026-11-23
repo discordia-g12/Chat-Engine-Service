@@ -299,6 +299,12 @@ describe('Rutas internas de llamadas privadas (#50)', () => {
       ]);
     });
 
+    it('acepta los avisos de Notification (NOTIFICATION_*)', async () => {
+      const notification = { type: 'NOTIFICATION_CREATED', notification: { id: 'n1', reason: 'thread_reply' } };
+      assert.strictEqual((await send({ userIds: ['alice'], event: notification })).statusCode, 202);
+      assert.deepStrictEqual(published, [{ userId: 'alice', payload: notification }]);
+    });
+
     it('un id repetido recibe el evento una sola vez', async () => {
       await send({ userIds: ['alice', 'alice'], event: ringing });
       assert.deepStrictEqual(published.map((p) => p.userId), ['alice']);
@@ -322,7 +328,7 @@ describe('Rutas internas de llamadas privadas (#50)', () => {
       ['sin event', { userIds: ['alice'] }],
       ['event que no es objeto', { userIds: ['alice'], event: 'CALL_RINGING' }],
       ['event sin type', { userIds: ['alice'], event: { call: {} } }],
-      ['type que no es CALL_', { userIds: ['alice'], event: { type: 'DM_MESSAGE', message: {} } }],
+      ['type que no es CALL_ ni NOTIFICATION_',{ userIds: ['alice'], event: { type: 'DM_MESSAGE', message: {} } }],
       ['type en minúsculas', { userIds: ['alice'], event: { type: 'call_ringing' } }],
     ];
 

@@ -3,6 +3,7 @@ import { connectDB } from './config/db';
 import { getRedis, disconnectRedis } from './config/redis';
 import { EventConsumer } from './services/EventConsumer';
 import { PubSubService } from './services/PubSubService';
+import { ThreadOutbox } from './services/ThreadOutbox';
 
 const start = async (): Promise<void> => {
   const app = buildApp();
@@ -13,6 +14,7 @@ const start = async (): Promise<void> => {
   // reports 503. Without an 'error' listener ioredis prints "Unhandled error event" on every retry.
   getRedis().on('error', (err) => app.log.warn({ err }, 'Redis connection error'));
   app.addHook('onClose', async () => {
+    await ThreadOutbox.stop();
     await PubSubService.stop();
     await disconnectRedis();
     await EventConsumer.stop();
@@ -22,6 +24,8 @@ const start = async (): Promise<void> => {
     await connectDB();
     // No bloquea: si RabbitMQ (nodo infra) no está, el chat arranca igual y el consumidor reintenta solo
     EventConsumer.start({ logger: app.log });
+    // Reintenta los avisos de hilos y los contadores que quedaron a mitad de camino (D3/D4)
+    ThreadOutbox.start({ logger: app.log });
     await PubSubService.start({ logger: app.log });
     await app.listen({ port, host });
     app.log.info(`Chat Engine Service listening on http://${host}:${port}`);

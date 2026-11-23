@@ -6,6 +6,7 @@ import { connectDB, disconnectDB } from '../src/config/db';
 import { MongoMemoryServer } from 'mongodb-memory-server';
 import { Message, IMessage } from '../src/models/Message';
 import { FastifyInstance } from 'fastify';
+import { ChatService, MAX_HISTORY_LIMIT, MAX_MISSED_MESSAGES } from '../src/services/ChatService';
 
 describe('History and Reconnection', () => {
   let app: FastifyInstance;
@@ -122,21 +123,101 @@ describe('History and Reconnection', () => {
   });
 
   it('Should hide internal details on unexpected errors (500)', async () => {
-    // Invalid ObjectId cursor makes Mongoose throw a CastError: not a client-safe message.
+    // Un error de la base (no del cliente): el detalle no sale en la respuesta
+    const find = mock.method(Message, 'find', () => {
+      throw new Error('connection pool exhausted at 10.0.1.20');
+    });
     const res = await app.inject({
       method: 'GET',
-      url: `/channels/${channelId}/messages?before=not-an-object-id`,
+      url: `/channels/${channelId}/messages?limit=10`,
       headers: { 'x-user-id': 'user-1' }
     });
+    find.mock.restore();
 
     assert.strictEqual(res.statusCode, 500);
     assert.strictEqual(res.json().detail, 'An unexpected error occurred');
+  });
+
+  describe('límites del historial (C4)', () => {
+    const get = (query: string) =>
+      app.inject({ method: 'GET', url: `/channels/${channelId}/messages${query}`, headers: { 'x-user-id': 'user-1' } });
+
+    it('400 con limit fuera de rango, que no es entero o un before que no es un id', async () => {
+      for (const query of ['?limit=0', `?limit=${MAX_HISTORY_LIMIT + 1}`, '?limit=1000000', '?limit=abc', '?limit=2.5', '?before=not-an-object-id', '?before=123']) {
+        const res = await get(query);
+        assert.strictEqual(res.statusCode, 400, query);
+      }
+    });
+
+    it(`acepta hasta ${MAX_HISTORY_LIMIT} y sin limit usa el default`, async () => {
+      assert.strictEqual((await get(`?limit=${MAX_HISTORY_LIMIT}`)).statusCode, 200);
+      assert.strictEqual((await get('')).statusCode, 200);
+    });
+
+    it(`la reconexión repone como mucho los ${MAX_MISSED_MESSAGES} más recientes, en orden`, async () => {
+      const busy = 'channel-history-busy';
+      const anchor = await Message.create({ content: 'visto', authorId: 'user-2', channelId: busy });
+      await Message.insertMany(
+        Array.from({ length: MAX_MISSED_MESSAGES + 20 }, (_, i) => ({ content: `m${i}`, authorId: 'user-2', channelId: busy }))
+      );
+
+      const missed = await ChatService.getMissedMessages(busy, anchor.id);
+
+      assert.strictEqual(missed.length, MAX_MISSED_MESSAGES);
+      assert.strictEqual(missed[missed.length - 1].content, `m${MAX_MISSED_MESSAGES + 19}`);
+      assert.ok(missed.every((m, i) => i === 0 || m.id > missed[i - 1].id));
+    });
+
+    it('un last_message_id_seen que no es un id no repone nada (antes rompía con un CastError)', async () => {
+      assert.deepStrictEqual(await ChatService.getMissedMessages(channelId, 'not-an-id'), []);
+    });
   });
 
   it('Should return problem+json 404 for unknown routes', async () => {
     const res = await app.inject({ method: 'GET', url: '/nope' });
     assert.strictEqual(res.statusCode, 404);
     assert.strictEqual(res.json().title, 'Not Found');
+  });
+
+  describe('responder citando', () => {
+    const quoteChannel = 'channel-quote';
+    const post = (payload: object) =>
+      app.inject({ method: 'POST', url: `/channels/${quoteChannel}/messages`, headers: { 'x-user-id': 'bob' }, payload });
+
+    it('guarda la cita y la devuelve en el historial', async () => {
+      const parent = await Message.create({ content: 'mensaje padre', authorId: 'alice', channelId: quoteChannel });
+
+      const res = await post({ content: 'mensaje respuesta', replyToId: parent.id });
+      assert.strictEqual(res.statusCode, 201);
+      assert.deepStrictEqual(res.json().replyTo, { id: parent.id, authorId: 'alice', content: 'mensaje padre' });
+
+      const history = await ChatService.getHistory(quoteChannel);
+      assert.deepStrictEqual(history.at(-1)?.replyTo, { id: parent.id, authorId: 'alice', content: 'mensaje padre' });
+    });
+
+    it('rechaza citar un id inválido, un mensaje de otro canal o uno borrado', async () => {
+      const elsewhere = await Message.create({ content: 'otro canal', authorId: 'alice', channelId: 'channel-other' });
+      const deleted = await Message.create({ content: '', authorId: 'alice', channelId: quoteChannel, isDeleted: true });
+
+      assert.strictEqual((await post({ content: 'x', replyToId: 'nope' })).statusCode, 400);
+      assert.strictEqual((await post({ content: 'x', replyToId: elsewhere.id })).statusCode, 404);
+      assert.strictEqual((await post({ content: 'x', replyToId: deleted.id })).statusCode, 404);
+    });
+
+    it('al editar o borrar el original, la cita se actualiza', async () => {
+      const parent = await Message.create({ content: 'antes', authorId: 'alice', channelId: quoteChannel });
+      const quote = (await post({ content: 'respuesta', replyToId: parent.id })).json();
+
+      await ChatService.editMessage('alice', quoteChannel, parent.id, 'después');
+      assert.strictEqual((await Message.findById(quote.id).lean())?.replyTo?.content, 'después');
+
+      await ChatService.deleteMessage('alice', quoteChannel, parent.id);
+      const reloaded = await Message.findById(quote.id).lean<IMessage>();
+      assert.deepStrictEqual(
+        { content: reloaded?.replyTo?.content, deleted: reloaded?.replyTo?.deleted },
+        { content: '', deleted: true }
+      );
+    });
   });
 
   it('Should load history with pagination in chronological order', async () => {

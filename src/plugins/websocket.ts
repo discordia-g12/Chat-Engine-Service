@@ -6,6 +6,7 @@ import { EventConsumer } from '../services/EventConsumer';
 import { ReadStateService } from '../services/ReadStateService';
 import { PubSubService } from '../services/PubSubService';
 import { ConversationService } from '../services/ConversationService';
+import { ThreadService } from '../services/ThreadService';
 import { PresenceService } from '../services/PresenceService';
 import { MAX_WATCHED_USERS, PresenceHub } from '../services/PresenceHub';
 import { canonicalUserGuard, channelAccessGuard } from '../helpers/auth';
@@ -102,6 +103,27 @@ export default async function websocketPlugin(app: FastifyInstance, opts: Websoc
               throw new ValidationError('id must be positive');
             }
 
+            // Respuesta de hilo (ADR-07): no va al canal ni marca el canal como leído
+            if (data.threadParentId !== undefined) {
+              if (typeof data.threadParentId !== 'string') {
+                throw new ValidationError('threadParentId must be a message id');
+              }
+              if (!isDmChannel(channelId) && !SessionManager.canSend(connection)) {
+                throw new ForbiddenError('User does not have permission to send messages in this channel');
+              }
+              await ThreadService.createReply(
+                userId,
+                channelId,
+                data.threadParentId,
+                data.content || '',
+                data.attachments,
+                serverId,
+                req.log,
+                data.replyToId
+              );
+              return;
+            }
+
             let savedPayload;
             if (isDmChannel(channelId)) {
               // Sin el canSend del socket: un bloqueo tiene que regir desde el mensaje siguiente
@@ -109,7 +131,8 @@ export default async function websocketPlugin(app: FastifyInstance, opts: Websoc
                 userId,
                 channelId,
                 data.content || '',
-                data.attachments
+                data.attachments,
+                data.replyToId
               );
             } else {
               if (!SessionManager.canSend(connection)) {
@@ -121,7 +144,9 @@ export default async function websocketPlugin(app: FastifyInstance, opts: Websoc
                 channelId,
                 data.content || '',
                 data.attachments,
-                true
+                true,
+                undefined,
+                data.replyToId
               );
 
               await PubSubService.publish(channelId, savedPayload);

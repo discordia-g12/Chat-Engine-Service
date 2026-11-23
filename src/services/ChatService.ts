@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import mongoose from 'mongoose';
-import { Message, IMessage, SystemEvent } from '../models/Message';
+import { Message, IMessage, IReplyTo, IThreadOutbox, SystemEvent } from '../models/Message';
 import { ReadState } from '../models/ReadState';
 import { ChannelAccessResult, PermissionService } from './PermissionService';
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from '../errors';
@@ -55,7 +55,80 @@ export interface MessagePayload {
   type?: string;
   /** Mensaje del sistema (`type: 'system'`): qué pasó y a quién. La interfaz arma el texto con su nombre actual. */
   system?: { event: SystemEvent; userId: string };
+  /** Respuesta de hilo: id del mensaje raíz (ADR-07). */
+  threadParentId?: string;
+  /** Raíz de un hilo: cuántas respuestas tiene y cuándo fue la última. */
+  thread?: ThreadSummaryPayload;
+  /** Mensaje citado (responder citando). `deleted`: el original se borró y ya no tiene texto. */
+  replyTo?: { id: string; authorId: string; content: string; deleted?: boolean };
 }
+
+export interface ThreadSummaryPayload {
+  replyCount: number;
+  lastReplyAt: Date;
+  lastReplyId: string;
+  participantIds: string[];
+  replierIds: string[];
+}
+
+/** Largo de la copia del texto citado: alcanza para la vista previa de una línea. */
+export const REPLY_PREVIEW_MAX_LENGTH = 200;
+
+/**
+ * Copia del mensaje al que se responde. Tiene que estar en el mismo canal y en la misma conversación: en el
+ * chat principal, un mensaje del canal; en un hilo, el raíz o una de sus respuestas. Ni borrado ni del sistema.
+ *
+ * @throws ValidationError si el id no es válido o el mensaje está en otra conversación
+ * @throws NotFoundError si no existe en el canal o está borrado
+ */
+async function resolveReplyTo(
+  channelId: string,
+  replyToId: unknown,
+  threadParentId?: mongoose.Types.ObjectId
+): Promise<IReplyTo> {
+  if (!isObjectIdString(replyToId)) {
+    throw new ValidationError('replyToId must be a message id');
+  }
+  const target = await Message.findOne(
+    { _id: replyToId, channelId, isDeleted: { $ne: true }, systemEvent: { $exists: false } },
+    { authorId: 1, content: 1, threadParentId: 1 }
+  ).lean<IMessage>();
+  if (!target) {
+    throw new NotFoundError('The message being replied to does not exist');
+  }
+  const targetId = target._id as mongoose.Types.ObjectId;
+  const sameConversation = threadParentId
+    ? targetId.equals(threadParentId) || target.threadParentId?.equals(threadParentId) === true
+    : !target.threadParentId;
+  if (!sameConversation) {
+    throw new ValidationError('Cannot reply to a message from another conversation');
+  }
+  return { id: targetId, authorId: target.authorId, content: (target.content ?? '').slice(0, REPLY_PREVIEW_MAX_LENGTH) };
+}
+
+/**
+ * Cuánto espera el relay antes de tomar algo del outbox: lo normal es que ThreadService lo complete en el
+ * momento, y así no lo hacen los dos a la vez.
+ */
+export const OUTBOX_GRACE_MS = 15_000;
+
+/**
+ * El resumen del raíz ya refleja esta respuesta: se saca la marca y, si no queda nada pendiente, el outbox
+ * entero (el índice parcial deja de verla).
+ */
+export async function clearSummaryPending(replyId: mongoose.Types.ObjectId): Promise<void> {
+  await Message.updateOne({ _id: replyId }, { $unset: { 'outbox.summaryPending': 1 } });
+  await Message.updateOne(
+    { _id: replyId, 'outbox.eventId': { $exists: false }, 'outbox.summaryPending': { $exists: false } },
+    { $unset: { outbox: 1 } }
+  );
+}
+
+/** Historial (C4): por página, 50 por defecto y hasta 100; `?limit=1000000` le pedía todo el canal a Atlas M0. */
+export const DEFAULT_HISTORY_LIMIT = 50;
+export const MAX_HISTORY_LIMIT = 100;
+/** Lo que se repone al reconectar: los más recientes. Si faltan más, el cliente los pide con el historial. */
+export const MAX_MISSED_MESSAGES = 100;
 
 /** Máximo de mensajes fijados por canal o DM. */
 export const PINNED_LIMIT = 50;
@@ -143,7 +216,10 @@ async function findSearchPage(channelIds: string[], search: NormalizedSearch): P
   return { messages: page, hasMore, nextCursor: hasMore ? page[page.length - 1].id : null };
 }
 
-function toPayload(msg: IMessage): MessagePayload {
+/** Lo que excluye las respuestas de hilo de las consultas del canal (historial, reconexión, no leídos). */
+export const NOT_A_THREAD_REPLY = { threadParentId: { $exists: false } } as const;
+
+export function toPayload(msg: IMessage): MessagePayload {
   const isDeleted = msg.isDeleted === true;
   return {
     id: msg._id.toString(),
@@ -183,6 +259,29 @@ function toPayload(msg: IMessage): MessagePayload {
     ...(msg.pinned && !isDeleted ? { pinnedAt: msg.pinnedAt ?? null, pinnedBy: msg.pinnedBy ?? null } : {}),
     ...(msg.systemEvent && !isDeleted ? { type: 'system', system: { event: msg.systemEvent, userId: msg.authorId } } : {}),
     ...(isDeleted ? { type: 'deleted', isDeleted: true, deletedAt: msg.deletedAt ?? null } : {}),
+    ...(msg.threadParentId ? { threadParentId: msg.threadParentId.toString() } : {}),
+    // También en un raíz borrado: el hilo sigue accesible ("mensaje eliminado · 3 respuestas")
+    ...(msg.thread
+      ? {
+          thread: {
+            replyCount: msg.thread.replyCount,
+            lastReplyAt: msg.thread.lastReplyAt,
+            lastReplyId: msg.thread.lastReplyId.toString(),
+            participantIds: msg.thread.participantIds ?? [],
+            replierIds: msg.thread.replierIds ?? [],
+          },
+        }
+      : {}),
+    ...(msg.replyTo && !isDeleted
+      ? {
+          replyTo: {
+            id: msg.replyTo.id.toString(),
+            authorId: msg.replyTo.authorId,
+            content: msg.replyTo.content ?? '',
+            ...(msg.replyTo.deleted ? { deleted: true } : {}),
+          },
+        }
+      : {}),
   };
 }
 
@@ -191,19 +290,27 @@ export class ChatService {
    * Retrieves paginated message history for a channel in chronological order.
    *
    * @param channelId Target channel identifier
-   * @param limit Maximum number of messages to fetch (default: 50)
+   * @param limit Maximum number of messages to fetch (default: 50, hasta MAX_HISTORY_LIMIT)
    * @param before Optional message ID cursor to load older messages
+   * @throws ValidationError si `limit` no es un entero entre 1 y MAX_HISTORY_LIMIT, o `before` no es un id
    */
   static async getHistory(
     channelId: string,
-    limit = 50,
+    limit = DEFAULT_HISTORY_LIMIT,
     before?: string
   ): Promise<MessagePayload[]> {
+    if (!Number.isInteger(limit) || limit < 1 || limit > MAX_HISTORY_LIMIT) {
+      throw new ValidationError(`limit must be an integer between 1 and ${MAX_HISTORY_LIMIT}`);
+    }
+    if (before !== undefined && !isObjectIdString(before)) {
+      throw new ValidationError('before must be a valid message id');
+    }
+
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const query: Record<string, any> = { channelId };
+    const query: Record<string, any> = { channelId, ...NOT_A_THREAD_REPLY };
 
     if (before) {
-      query._id = { $lt: before };
+      query._id = { $lt: new mongoose.Types.ObjectId(before) };
     }
 
     const messages = await Message.find(query)
@@ -243,8 +350,9 @@ export class ChatService {
   }
 
   /**
-   * Retrieves messages missed during temporary client disconnection.
-   * Fetches all messages created after the last known message in chronological order.
+   * Retrieves messages missed during temporary client disconnection, in chronological order. Como mucho los
+   * MAX_MISSED_MESSAGES más recientes (C4): un corte largo en un canal muy activo no trae todo de una vez, y el
+   * resto se pide con el historial. Un id que no es un ObjectId no repone nada.
    *
    * @param channelId Target channel identifier
    * @param lastMessageIdSeen Message ID cursor provided by client handshake
@@ -253,6 +361,9 @@ export class ChatService {
     channelId: string,
     lastMessageIdSeen: string
   ): Promise<MessagePayload[]> {
+    if (!isObjectIdString(lastMessageIdSeen)) {
+      return [];
+    }
     const lastSeen = await Message.findById(lastMessageIdSeen).lean<IMessage>();
     if (!lastSeen) {
       return [];
@@ -260,12 +371,14 @@ export class ChatService {
 
     const missedMessages = await Message.find({
       channelId,
-      _id: { $gt: lastMessageIdSeen },
+      ...NOT_A_THREAD_REPLY,
+      _id: { $gt: new mongoose.Types.ObjectId(lastMessageIdSeen) },
     })
-      .sort({ _id: 1 })
+      .sort({ _id: -1 })
+      .limit(MAX_MISSED_MESSAGES)
       .lean<IMessage[]>();
 
-    return missedMessages.map(toPayload);
+    return missedMessages.reverse().map(toPayload);
   }
 
   /**
@@ -292,6 +405,8 @@ export class ChatService {
    * @param authorId User sending the message
    * @param channelId Target channel identifier
    * @param content Text body of the message
+   * @param thread Raíz del hilo y lo que queda pendiente, si es una respuesta (lo arma ThreadService)
+   * @param replyToId Mensaje que cita (responder citando), ver resolveReplyTo
    * @throws UpstreamUnavailableError si hay que validar @everyone o un rol y Core no responde
    */
   static async sendMessage(
@@ -299,7 +414,9 @@ export class ChatService {
     channelId: string,
     content: string,
     attachmentsOrSkip?: MessageAttachmentPayload[] | boolean,
-    skipCheck = false
+    skipCheck = false,
+    thread?: { parentId: mongoose.Types.ObjectId; outbox: IThreadOutbox },
+    replyToId?: string
   ): Promise<MessagePayload> {
     const attachments = Array.isArray(attachmentsOrSkip) ? attachmentsOrSkip : undefined;
     const skipPermissionCheck = typeof attachmentsOrSkip === 'boolean' ? attachmentsOrSkip : skipCheck;
@@ -311,6 +428,8 @@ export class ChatService {
         throw new ForbiddenError('User does not have permission to send messages in this channel');
       }
     }
+
+    const replyTo = replyToId == null ? undefined : await resolveReplyTo(channelId, replyToId, thread?.parentId);
 
     const parsed = parseMentions(content);
     let roleIds: string[] = [];
@@ -333,6 +452,9 @@ export class ChatService {
       ...(roleIds.length > 0 ? { mentionRoleIds: roleIds } : {}),
       ...(everyone ? { mentionEveryone: true } : {}),
       ...(attachments && attachments.length > 0 ? { attachments } : {}),
+      // La respuesta y su outbox en el mismo documento: se guardan juntos o no se guarda ninguno
+      ...(thread ? { threadParentId: thread.parentId, outbox: thread.outbox } : {}),
+      ...(replyTo ? { replyTo } : {}),
     });
 
     await messageDocument.validate();
@@ -458,6 +580,10 @@ export class ChatService {
     message.mentionEveryone = everyone ? true : undefined;
 
     await message.save();
+    await Message.updateMany(
+      { 'replyTo.id': message._id },
+      { $set: { 'replyTo.content': trimmed.slice(0, REPLY_PREVIEW_MAX_LENGTH) } }
+    );
 
     const payload = toPayload(message);
     return {
@@ -529,8 +655,30 @@ export class ChatService {
     message.pinned = false;
     message.pinnedAt = null;
     message.pinnedBy = null;
+    // Respuesta de hilo: queda anotado en el mismo guardado que falta restar del contador (D4). Si el proceso se
+    // cae antes de restar, ThreadOutbox recuenta el hilo.
+    if (message.threadParentId) {
+      message.outbox = {
+        ...(message.outbox ? { eventId: message.outbox.eventId } : {}),
+        summaryPending: true,
+        serverId: message.outbox?.serverId ?? serverId ?? '',
+        attempts: 0,
+        nextAttemptAt: new Date(Date.now() + OUTBOX_GRACE_MS),
+      };
+    }
 
     await message.save();
+    // Las citas no siguen mostrando el texto de un mensaje borrado
+    await Message.updateMany({ 'replyTo.id': message._id }, { $set: { 'replyTo.content': '', 'replyTo.deleted': true } });
+
+    // El contador del raíz cuenta solo respuestas visibles. Solo acá: un segundo DELETE sale antes, sin restar.
+    if (message.threadParentId) {
+      await Message.updateOne(
+        { _id: message.threadParentId, 'thread.replyCount': { $gt: 0 } },
+        { $inc: { 'thread.replyCount': -1 } }
+      );
+      await clearSummaryPending(message._id as mongoose.Types.ObjectId);
+    }
 
     // Audit Log: Si un moderador elimina el mensaje de otro usuario en un servidor
     if (!isDm && !isAuthor) {
@@ -684,6 +832,11 @@ export class ChatService {
 
     if (message.systemEvent) {
       throw new ValidationError('System messages cannot be pinned');
+    }
+
+    // Los fijados son del canal: una respuesta de hilo no está en el canal
+    if (message.threadParentId) {
+      throw new ValidationError('Thread replies cannot be pinned');
     }
 
     if ((message.pinned === true) === pinned) {
