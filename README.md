@@ -284,13 +284,14 @@ Cola `chat_engine_events`, enlazada a `member.*`, `role.*`, `server.deleted`, `s
 En el exchange `server.events`:
 
 - `message.deleted_by_moderator`: un moderador borró el mensaje de otro (auditoría en Notification-Audit-Metrics).
-- `chat.message.created`: una respuesta de hilo con participantes para avisar (ADR-07 y ADR 0017 de la
-  organización). Lleva `server_id` (`null` en un DM), `channel_id`, `thread_id`, `message_id`, `author_id`,
-  `thread_participant_ids` (sin el autor y sin quienes ya no son miembros), `mention_user_ids`,
-  `mention_role_ids`, `mention_everyone`, `is_dm`, `preview` (140 caracteres) y `created_at`. Sale después de
-  guardar la respuesta, con confirmación de RabbitMQ. Lo que no se confirmó (RabbitMQ o Server-Roles caídos, o el
-  proceso cayéndose en el medio) queda en el outbox de la propia respuesta y lo reintenta `ThreadOutbox` cada 10 s,
-  con el mismo `event_id`. Ver ADR-07.
+- `chat.message.created`: cada mensaje de DM, cada mensaje de canal de servidor y cada respuesta de hilo con
+  participantes para avisar (ADR-07 y ADR 0017 de la organización). Lleva `server_id` (`null` en un DM),
+  `channel_id`, `thread_id` (`null` fuera de un hilo), `message_id`, `author_id`, `thread_participant_ids` (solo
+  en una respuesta: sin el autor y sin quienes ya no son miembros; si no, vacío), `recipient_ids` (solo en un
+  mensaje de DM: el otro participante), `mention_user_ids`, `mention_role_ids`, `mention_everyone`, `is_dm`,
+  `preview` (140 caracteres) y `created_at`. Sale después de guardar el mensaje, con confirmación de RabbitMQ. Lo
+  que no se confirmó (RabbitMQ o Server-Roles caídos, o el proceso cayéndose en el medio) queda en el outbox del
+  propio mensaje y lo reintenta `ThreadOutbox` cada 10 s, con el mismo `event_id`. Ver ADR-07.
 
 Si RabbitMQ no está al arrancar, el consumidor reintenta solo (de 1 a 30 s) sin bloquear el servicio.
 
@@ -323,7 +324,7 @@ src/
 ├── plugins/errorHandler.ts    errores RFC 7807
 ├── services/ChatService.ts    guardar mensajes, historial y mensajes perdidos
 ├── services/ThreadService.ts  respuestas de hilo y resumen del raíz
-├── services/ThreadOutbox.ts   outbox de los hilos: aviso a Notification y recuento si algo quedó a medias
+├── services/ThreadOutbox.ts   outbox de los mensajes: aviso a Notification y recuento de hilos a medias
 ├── services/SessionManager.ts sesiones abiertas por canal y usuario (en memoria)
 ├── services/PubSubService.ts   distribución de mensajes multi-nodo (Redis Pub/Sub)
 ├── services/PermissionService.ts  consulta a Server-Roles

@@ -1,4 +1,6 @@
 import mongoose from 'mongoose';
+import { Conversation, IConversation } from '../models/Conversation';
+import { isDmChannel, parseDmChannelId } from '../helpers/directMessages';
 import { Message, IMessage } from '../models/Message';
 import { clearSummaryPending } from './ChatService';
 import { EventConsumer } from './EventConsumer';
@@ -53,9 +55,10 @@ async function postpone(replyId: ObjectId, attempts: number): Promise<void> {
 }
 
 /**
- * Outbox de las respuestas de hilo (ADR-07, D3 y D4). Lo pendiente va en la misma respuesta (`outbox`), escrito
- * junto con ella. ThreadService lo completa en el momento; esto lo reintenta si RabbitMQ o Server-Roles no
- * respondieron, o si el proceso se cayó en el medio.
+ * Outbox de los mensajes (ADR-07, D3 y D4). Lo pendiente va en el mismo mensaje (`outbox`), escrito junto con
+ * él. Empezó con las respuestas de hilo y hoy lleva también el aviso de cada mensaje de DM y de canal de
+ * servidor. Se completa en el momento; esto lo reintenta si RabbitMQ o Server-Roles no respondieron, o si
+ * el proceso se cayó en el medio.
  */
 export class ThreadOutbox {
   private static timer: NodeJS.Timeout | null = null;
@@ -97,70 +100,103 @@ export class ThreadOutbox {
   }
 
   /**
-   * Publica `chat.message.created` de una respuesta (ADR 0017) y lo saca del outbox solo si RabbitMQ lo confirmó.
-   * Los destinatarios se calculan al publicar: los participantes del raíz menos el autor y, en un servidor, sin
-   * quienes ya no son miembros. Si Server-Roles no responde se reintenta después (antes que mandarle el texto
-   * a quien se fue). El event_id es siempre el mismo: Notification descarta las repeticiones.
+   * A quién nombra el evento, según el mensaje (ADR 0017). null si no hay a quién avisar.
+   * - Respuesta de hilo: los participantes del raíz menos el autor y, en un servidor, sin quienes ya no son
+   *   miembros. Si Server-Roles no responde, tira (se reintenta antes que mandarle el texto a quien se fue).
+   * - DM: `recipient_ids`, los participantes de la conversación menos el autor.
+   * - Canal de servidor: nadie en particular. Notification suma a los mencionados y a quienes pidieron `all`.
+   */
+  private static async audience(
+    message: IMessage,
+    serverId: string
+  ): Promise<{ threadId: string | null; participants: string[]; recipientIds?: string[] } | null> {
+    if (message.threadParentId) {
+      const root = await Message.findById(message.threadParentId).lean<IMessage>();
+      if (!root) return null;
+      let participants = (root.thread?.participantIds ?? [root.authorId]).filter((id) => id !== message.authorId);
+      if (serverId && participants.length > 0) {
+        const members = new Set(await PermissionService.getServerMemberIds(serverId));
+        participants = participants.filter((id) => members.has(id));
+      }
+      return participants.length > 0 ? { threadId: root._id.toString(), participants } : null;
+    }
+    if (isDmChannel(message.channelId)) {
+      const conversation = await Conversation.findById(parseDmChannelId(message.channelId)).lean<IConversation>();
+      const recipientIds = (conversation?.participantIds ?? []).filter((id) => id !== message.authorId);
+      return recipientIds.length > 0 ? { threadId: null, participants: [], recipientIds } : null;
+    }
+    return { threadId: null, participants: [] };
+  }
+
+  /**
+   * Publica `chat.message.created` (ADR 0017) y lo saca del outbox solo si RabbitMQ lo confirmó. Los
+   * destinatarios se calculan al publicar (ver audience). El event_id es siempre el mismo: Notification descarta
+   * las repeticiones.
    *
    * @returns true si ya no queda aviso pendiente (publicado o que no corresponde)
    */
-  static async deliver(replyId: ObjectId): Promise<boolean> {
-    const reply = await Message.findById(replyId).lean<IMessage>();
-    const outbox = reply?.outbox;
-    if (!reply || !outbox?.eventId) return true;
+  static async deliver(messageId: ObjectId): Promise<boolean> {
+    const message = await Message.findById(messageId).lean<IMessage>();
+    const outbox = message?.outbox;
+    if (!message || !outbox?.eventId) return true;
 
-    // Borrada antes de avisar, o sin raíz: no hay nada que contar
-    const root = reply.threadParentId ? await Message.findById(reply.threadParentId).lean<IMessage>() : null;
-    if (reply.isDeleted || !root) {
-      await clearEvent(replyId);
+    // Borrado antes de avisar: no hay nada que contar
+    if (message.isDeleted) {
+      await clearEvent(messageId);
       return true;
     }
 
-    let participants = (root.thread?.participantIds ?? [root.authorId]).filter((id) => id !== reply.authorId);
+    let audience;
     try {
-      if (outbox.serverId && participants.length > 0) {
-        const members = new Set(await PermissionService.getServerMemberIds(outbox.serverId));
-        participants = participants.filter((id) => members.has(id));
-      }
+      audience = await this.audience(message, outbox.serverId);
     } catch (err) {
-      this.logger.warn({ err, messageId: replyId.toString() }, 'Thread reply event postponed: Server-Roles unavailable');
-      await postpone(replyId, outbox.attempts + 1);
+      this.logger.warn({ err, messageId: messageId.toString() }, 'Message event postponed: recipients unavailable');
+      await postpone(messageId, outbox.attempts + 1);
       return false;
     }
-    if (participants.length === 0) {
-      await clearEvent(replyId);
+    if (!audience) {
+      await clearEvent(messageId);
       return true;
     }
 
+    const isDm = isDmChannel(message.channelId);
     const published = await EventConsumer.publishConfirmed('chat.message.created', {
       event_id: outbox.eventId,
       event_type: 'chat.message.created',
       server_id: outbox.serverId || null,
-      channel_id: reply.channelId,
-      thread_id: root._id.toString(),
-      message_id: replyId.toString(),
-      author_id: reply.authorId,
-      thread_participant_ids: participants,
-      mention_user_ids: reply.mentionUserIds ?? [],
-      mention_role_ids: reply.mentionRoleIds ?? [],
-      mention_everyone: reply.mentionEveryone === true,
-      is_dm: !outbox.serverId,
-      preview: toPreview(reply.content),
-      created_at: new Date(reply.createdAt).toISOString(),
+      channel_id: message.channelId,
+      thread_id: audience.threadId,
+      message_id: messageId.toString(),
+      author_id: message.authorId,
+      thread_participant_ids: audience.participants,
+      ...(audience.recipientIds ? { recipient_ids: audience.recipientIds } : {}),
+      mention_user_ids: message.mentionUserIds ?? [],
+      mention_role_ids: message.mentionRoleIds ?? [],
+      mention_everyone: message.mentionEveryone === true,
+      is_dm: isDm,
+      preview: toPreview(message.content),
+      created_at: new Date(message.createdAt).toISOString(),
     });
     if (published) {
-      await clearEvent(replyId);
+      await clearEvent(messageId);
       return true;
     }
 
     const attempts = outbox.attempts + 1;
     if (attempts >= MAX_ATTEMPTS) {
-      this.logger.error({ messageId: replyId.toString(), attempts }, 'Thread reply event dropped after max attempts');
-      await clearEvent(replyId);
+      this.logger.error({ messageId: messageId.toString(), attempts }, 'Message event dropped after max attempts');
+      await clearEvent(messageId);
       return true;
     }
-    await postpone(replyId, attempts);
+    await postpone(messageId, attempts);
     return false;
+  }
+
+  /** Publica ya, sin esperar: si falla, el aviso queda en el outbox y lo toma el relay. */
+  static deliverInBackground(messageId: ObjectId): void {
+    void this.deliver(messageId).catch((err) =>
+      this.logger.warn({ err, messageId: messageId.toString() }, 'Message event left in the outbox')
+    );
   }
 
   /** Una vuelta del relay: lo vencido, de lo más viejo a lo más nuevo. */
