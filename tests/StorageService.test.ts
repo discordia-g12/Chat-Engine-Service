@@ -108,11 +108,11 @@ describe('StorageService', () => {
       assert.strictEqual(readContent.toString(), content.toString());
     });
 
-    it('should upload to S3 when S3 is configured', async () => {
+    it('should upload to S3 when S3 is configured, and answer with a signed URL', async () => {
       process.env.S3_BUCKET = 'my-bucket';
       process.env.AWS_ACCESS_KEY_ID = 'test-key';
       process.env.AWS_SECRET_ACCESS_KEY = 'test-secret';
-      process.env.S3_PUBLIC_BASE_URL = 'https://cdn.discordia.app';
+      delete process.env.AWS_REGION;
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       let sentCommand: any = null;
@@ -135,17 +135,95 @@ describe('StorageService', () => {
         assert.strictEqual(attachment.name, 'cloud.png');
         assert.strictEqual(attachment.size, content.length);
         assert.strictEqual(attachment.contentType, 'image/png');
-        assert.match(attachment.url, /^https:\/\/cdn\.discordia\.app\/attachments\/channel-s3\/att-.*cloud\.png$/);
+        assert.match(
+          attachment.url,
+          /^https:\/\/my-bucket\.s3\.us-east-1\.amazonaws\.com\/attachments\/channel-s3\/att-.*cloud\.png\?X-Amz-Algorithm=AWS4-HMAC-SHA256&.*&X-Amz-Signature=[0-9a-f]{64}$/
+        );
         assert.ok(sentCommand);
         assert.strictEqual(sentCommand.input.Bucket, 'my-bucket');
+        assert.match(sentCommand.input.Key, /^attachments\/channel-s3\/att-.*cloud\.png$/);
         assert.strictEqual(sentCommand.input.ContentType, 'image/png');
       } finally {
         delete process.env.S3_BUCKET;
         delete process.env.AWS_ACCESS_KEY_ID;
         delete process.env.AWS_SECRET_ACCESS_KEY;
-        delete process.env.S3_PUBLIC_BASE_URL;
         S3Client.prototype.send = originalSend;
       }
+    });
+  });
+
+  describe('signAttachmentUrl', () => {
+    const stored = 'https://my-bucket.s3.us-east-1.amazonaws.com/attachments/dm-abc/att-1-foto.png';
+    const now = new Date('2026-11-24T15:30:00Z');
+
+    const withS3 = (fn: () => void) => {
+      process.env.S3_BUCKET = 'my-bucket';
+      process.env.AWS_ACCESS_KEY_ID = 'test-key';
+      process.env.AWS_SECRET_ACCESS_KEY = 'test-secret';
+      delete process.env.AWS_REGION;
+      try {
+        fn();
+      } finally {
+        delete process.env.S3_BUCKET;
+        delete process.env.AWS_ACCESS_KEY_ID;
+        delete process.env.AWS_SECRET_ACCESS_KEY;
+      }
+    };
+
+    it('without S3 the URL goes out as is (local disk)', () => {
+      const local = '/api/v1/chat/uploads/attachments/c1/att-1-a.png';
+      assert.strictEqual(StorageService.signAttachmentUrl(local, 'c1', now), local);
+    });
+
+    it('signs an attachment of the same channel, valid for 24 h from the start of the 12 h window', () => {
+      withS3(() => {
+        const url = new URL(StorageService.signAttachmentUrl(stored, 'dm-abc', now));
+        assert.strictEqual(url.host, 'my-bucket.s3.us-east-1.amazonaws.com');
+        assert.strictEqual(url.pathname, '/attachments/dm-abc/att-1-foto.png');
+        assert.strictEqual(url.searchParams.get('X-Amz-Date'), '20261124T120000Z');
+        assert.strictEqual(url.searchParams.get('X-Amz-Expires'), '86400');
+        assert.strictEqual(url.searchParams.get('X-Amz-Credential'), 'test-key/20261124/us-east-1/s3/aws4_request');
+        assert.match(url.searchParams.get('X-Amz-Signature') ?? '', /^[0-9a-f]{64}$/);
+      });
+    });
+
+    it('gives the same URL inside a 12 h window (cacheable) and a new one after it', () => {
+      withS3(() => {
+        const a = StorageService.signAttachmentUrl(stored, 'dm-abc', new Date('2026-11-24T12:00:00Z'));
+        const b = StorageService.signAttachmentUrl(stored, 'dm-abc', new Date('2026-11-24T23:59:59Z'));
+        const c = StorageService.signAttachmentUrl(stored, 'dm-abc', new Date('2026-11-25T00:00:00Z'));
+        assert.strictEqual(a, b);
+        assert.notStrictEqual(a, c);
+      });
+    });
+
+    it('re-signs a stored URL that already had an (old) signature', () => {
+      withS3(() => {
+        const old = `${stored}?X-Amz-Signature=deadbeef&X-Amz-Date=20200101T000000Z`;
+        assert.strictEqual(
+          StorageService.signAttachmentUrl(old, 'dm-abc', now),
+          StorageService.signAttachmentUrl(stored, 'dm-abc', now)
+        );
+      });
+    });
+
+    it('does not sign an attachment of another channel: it goes out without signature (S3 answers 403)', () => {
+      withS3(() => {
+        const signed = `${stored}?X-Amz-Signature=deadbeef`;
+        assert.strictEqual(StorageService.signAttachmentUrl(signed, 'dm-otro', now), stored);
+        const sneaky = 'https://my-bucket.s3.us-east-1.amazonaws.com/attachments/dm-abc/../dm-otro/x.png';
+        assert.ok(!StorageService.signAttachmentUrl(sneaky, 'dm-abc', now).includes('X-Amz-Signature'));
+      });
+    });
+
+    it('leaves URLs of other hosts and invalid URLs as they are', () => {
+      withS3(() => {
+        const other = 'https://example.com/attachments/dm-abc/x.png';
+        assert.strictEqual(StorageService.signAttachmentUrl(other, 'dm-abc', now), other);
+        assert.strictEqual(StorageService.signAttachmentUrl('no es una url', 'dm-abc', now), 'no es una url');
+        const avatar = 'https://my-bucket.s3.us-east-1.amazonaws.com/avatars/x.webp';
+        assert.strictEqual(StorageService.signAttachmentUrl(avatar, 'dm-abc', now), avatar);
+      });
     });
   });
 });
