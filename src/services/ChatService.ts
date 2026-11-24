@@ -13,6 +13,7 @@ import {
   buildContainsPattern,
 } from '../helpers/search';
 import { EventConsumer } from './EventConsumer';
+import { ThreadOutbox } from './ThreadOutbox';
 
 /** Menciones que notifican. Un @everyone o un rol sin permiso queda en el texto pero no acá. */
 export interface MessageMentions {
@@ -407,6 +408,7 @@ export class ChatService {
    * @param content Text body of the message
    * @param thread Raíz del hilo y lo que queda pendiente, si es una respuesta (lo arma ThreadService)
    * @param replyToId Mensaje que cita (responder citando), ver resolveReplyTo
+   * @param serverId Servidor del canal: sin él (y fuera de un DM) no se avisa a Notification
    * @throws UpstreamUnavailableError si hay que validar @everyone o un rol y Core no responde
    */
   static async sendMessage(
@@ -416,7 +418,8 @@ export class ChatService {
     attachmentsOrSkip?: MessageAttachmentPayload[] | boolean,
     skipCheck = false,
     thread?: { parentId: mongoose.Types.ObjectId; outbox: IThreadOutbox },
-    replyToId?: string
+    replyToId?: string,
+    serverId?: string
   ): Promise<MessagePayload> {
     const attachments = Array.isArray(attachmentsOrSkip) ? attachmentsOrSkip : undefined;
     const skipPermissionCheck = typeof attachmentsOrSkip === 'boolean' ? attachmentsOrSkip : skipCheck;
@@ -444,6 +447,21 @@ export class ChatService {
       }
     }
 
+    // Aviso a Notification (ADR 0017) de todo mensaje de DM o de canal de servidor. Las respuestas traen el suyo
+    // (ThreadService). Va en el mismo documento: se guarda con el mensaje o no se guarda.
+    const isDm = isDmChannel(channelId);
+    const eventServerId = isDm ? '' : (serverId || access?.serverId);
+    const outbox: IThreadOutbox | undefined = thread
+      ? thread.outbox
+      : isDm || eventServerId
+        ? {
+            eventId: crypto.randomUUID(),
+            serverId: eventServerId ?? '',
+            attempts: 0,
+            nextAttemptAt: new Date(Date.now() + OUTBOX_GRACE_MS),
+          }
+        : undefined;
+
     const messageDocument = new Message({
       content,
       authorId,
@@ -453,12 +471,14 @@ export class ChatService {
       ...(everyone ? { mentionEveryone: true } : {}),
       ...(attachments && attachments.length > 0 ? { attachments } : {}),
       // La respuesta y su outbox en el mismo documento: se guardan juntos o no se guarda ninguno
-      ...(thread ? { threadParentId: thread.parentId, outbox: thread.outbox } : {}),
+      ...(thread ? { threadParentId: thread.parentId } : {}),
+      ...(outbox ? { outbox } : {}),
       ...(replyTo ? { replyTo } : {}),
     });
 
     await messageDocument.validate();
     await messageDocument.save();
+    if (outbox && !thread) ThreadOutbox.deliverInBackground(messageDocument._id as mongoose.Types.ObjectId);
 
     return toPayload(messageDocument.toObject<IMessage>());
   }

@@ -53,6 +53,20 @@ Restricciones que condicionan el diseño:
   respuestas; si quedó `eventId`, vuelve a publicar con el mismo id (Notification descarta las repeticiones).
   Backoff de 30 s a 30 min; a los 25 intentos (unas 9 h) lo deja y lo loguea como error. Una respuesta
   borrada antes de avisar no se avisa.
+* **Mismo aviso para DMs y canales** (épica de notificaciones, ADR 0017). Todo mensaje que no es respuesta
+  también se guarda con `outbox: { eventId, serverId, attempts, nextAttemptAt }` (sin `summaryPending`) y sale
+  por el mismo `deliver` y el mismo relay. Lo arma `ChatService.sendMessage`, el único camino de escritura de
+  los mensajes de usuario. Cambia solo a quién nombra el evento:
+  * **DM:** `recipient_ids`, campo opcional nuevo, con los participantes de la conversación menos el autor (se
+    leen al publicar). Solo en mensajes de DM. No se reutilizó `thread_participant_ids`: sigue significando
+    "participantes del hilo" y Notification lo usa para `thread_reply`. Una respuesta de hilo en un DM sigue
+    como antes, sin `recipient_ids`.
+  * **Canal de servidor:** sale siempre, con o sin menciones, para el nivel `all`. `thread_participant_ids`
+    vacío y sin `recipient_ids`: los mencionados viajan en `mention_*` y quién pidió `all` lo resuelve
+    Notification con sus preferencias. Chat no llama a Server-Roles por estos mensajes.
+  * Sin `serverId` conocido fuera de un DM no se guarda aviso (sin `server_id` Notification no puede aplicar
+    las preferencias). Los dos caminos de envío (socket y `POST`) lo pasan siempre.
+  * Los mensajes del sistema ("se unió …") no avisan: no pasan por `sendMessage`.
 
 **Alternativas descartadas:**
 
@@ -70,6 +84,9 @@ Restricciones que condicionan el diseño:
 
 * Una escritura extra por respuesta (el raíz) y, en un servidor, una llamada a Server-Roles fuera del camino de
   la respuesta.
+* Cada mensaje de usuario publica un `chat.message.created` (uno solo, sin importar cuántos miembros o menciones
+  tenga) y hace una escritura más en Mongo para sacar el outbox; un DM, además, una lectura de la conversación.
+  Con RabbitMQ caído, los mensajes se acumulan con su outbox y el relay los toma de a 50 por vuelta.
 * Si el proceso se cae entre guardar la respuesta y actualizar el raíz, el relay recuenta el hilo. El recuento
   y un `$inc` simultáneo pueden dejar el contador uno arriba hasta el próximo recuento: solo en la recuperación
   de una caída, y se acepta.

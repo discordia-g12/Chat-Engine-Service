@@ -34,7 +34,16 @@ export default async function historyPlugin(app: FastifyInstance) {
     if (isDmChannel(channelId)) {
       savedPayload = await ConversationService.sendMessage(userId, channelId, content, attachments, replyToId);
     } else {
-      savedPayload = await ChatService.sendMessage(userId, channelId, content, attachments, true, undefined, replyToId);
+      savedPayload = await ChatService.sendMessage(
+        userId,
+        channelId,
+        content,
+        attachments,
+        true,
+        undefined,
+        replyToId,
+        req.serverId
+      );
       await PubSubService.publish(channelId, savedPayload);
     }
     ReadStateService.markRead(userId, channelId, savedPayload.id).catch((err) =>

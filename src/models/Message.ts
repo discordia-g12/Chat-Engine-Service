@@ -42,9 +42,10 @@ export interface IReplyTo {
 }
 
 /**
- * Lo que falta hacer después de guardar una respuesta de hilo (ADR-07, D3/D4). Va en el mismo documento: se
- * escribe con la respuesta en una sola operación (atómica en Mongo), así una caída no lo pierde. Lo completa
- * ThreadService en el momento y, si falla o el proceso se cae, ThreadOutbox lo reintenta.
+ * Lo que falta hacer después de guardar un mensaje (ADR-07, D3/D4): el aviso a Notification y, en una respuesta
+ * de hilo, el resumen del raíz. Va en el mismo documento: se escribe con el mensaje en una sola operación
+ * (atómica en Mongo), así una caída no lo pierde. Se completa en el momento y, si falla o el proceso se cae,
+ * ThreadOutbox lo reintenta.
  */
 export interface IThreadOutbox {
   /** El aviso `chat.message.created` todavía no lo confirmó RabbitMQ. Se reusa en cada intento (idempotencia). */
@@ -83,7 +84,7 @@ export interface IMessage extends Document {
   threadParentId?: mongoose.Types.ObjectId;
   /** Solo en el raíz de un hilo con al menos una respuesta. */
   thread?: IThreadSummary;
-  /** Solo en una respuesta con algo pendiente (ver IThreadOutbox). */
+  /** Solo en un mensaje con algo pendiente (ver IThreadOutbox). */
   outbox?: IThreadOutbox;
   /** Mensaje citado, si responde a uno. */
   replyTo?: IReplyTo;

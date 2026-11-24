@@ -146,7 +146,8 @@ export default async function websocketPlugin(app: FastifyInstance, opts: Websoc
                 data.attachments,
                 true,
                 undefined,
-                data.replyToId
+                data.replyToId,
+                serverId
               );
 
               await PubSubService.publish(channelId, savedPayload);
