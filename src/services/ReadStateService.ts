@@ -2,6 +2,7 @@ import { Types } from 'mongoose';
 import { Message } from '../models/Message';
 import { ReadState } from '../models/ReadState';
 import { PermissionService } from './PermissionService';
+import { NOT_A_THREAD_REPLY } from './ChatService';
 import { NotFoundError, ValidationError } from '../errors';
 
 /** Tope del contador por canal: más que esto, la interfaz muestra "99+". */
@@ -24,9 +25,17 @@ function mentionsOf(userId: string, roleIds: string[]) {
   ];
 }
 
-/** Mensajes de otros posteriores a lo leído. Sin `lastRead`, todos los del canal. */
+/**
+ * Mensajes de otros posteriores a lo leído. Sin `lastRead`, todos los del canal. Las respuestas de hilo no
+ * cuentan: no están en el canal y se avisan por Notification (ADR-07).
+ */
 function unreadFilter(userId: string, channelId: string, lastRead?: Types.ObjectId) {
-  return { channelId, ...(lastRead ? { _id: { $gt: lastRead } } : {}), authorId: { $ne: userId } };
+  return {
+    channelId,
+    ...NOT_A_THREAD_REPLY,
+    ...(lastRead ? { _id: { $gt: lastRead } } : {}),
+    authorId: { $ne: userId },
+  };
 }
 
 /** Un _id que queda después de todo lo enviado hasta ahora (y antes de lo que se envíe después). */

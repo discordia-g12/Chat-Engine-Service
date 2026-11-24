@@ -253,6 +253,41 @@ describe('Rutas internas de llamadas privadas (#50)', () => {
     const send = (payload: unknown, headers: Record<string, string> = {}) =>
       app.inject({ method: 'POST', url: '/internal/inbox/events', payload: payload as object, headers });
 
+    describe('con INTERNAL_API_TOKEN (V9)', () => {
+      const token = 'a'.repeat(64);
+      before(() => {
+        process.env.INTERNAL_API_TOKEN = token;
+      });
+      after(() => {
+        delete process.env.INTERNAL_API_TOKEN;
+      });
+
+      it('202 con el token correcto', async () => {
+        const res = await send({ userIds: ['alice'], event: ringing }, { 'x-internal-token': token });
+        assert.strictEqual(res.statusCode, 202);
+        assert.strictEqual(published.length, 1);
+      });
+
+      for (const [name, headers] of [
+        ['sin token', {}],
+        ['con otro token del mismo largo', { 'x-internal-token': 'b'.repeat(64) }],
+        ['con un token de otro largo', { 'x-internal-token': 'a' }],
+      ] as [string, Record<string, string>][]) {
+        it(`401 ${name}, sin publicar nada`, async () => {
+          assertProblem(await send({ userIds: ['alice'], event: ringing }, headers), 401);
+          assert.deepStrictEqual(published, []);
+        });
+      }
+
+      it('por Kong sigue siendo 404, aunque traiga el token', async () => {
+        const res = await send(
+          { userIds: ['alice'], event: ringing },
+          { 'x-internal-token': token, 'x-user-id': 'alice' }
+        );
+        assertProblem(res, 404);
+      });
+    });
+
     it('202 y publica el evento tal cual en el inbox de cada uno', async () => {
       const res = await send({ userIds: ['alice', 'bob'], event: ringing });
 
@@ -262,6 +297,12 @@ describe('Rutas internas de llamadas privadas (#50)', () => {
         { userId: 'alice', payload: ringing },
         { userId: 'bob', payload: ringing },
       ]);
+    });
+
+    it('acepta los avisos de Notification (NOTIFICATION_*)', async () => {
+      const notification = { type: 'NOTIFICATION_CREATED', notification: { id: 'n1', reason: 'thread_reply' } };
+      assert.strictEqual((await send({ userIds: ['alice'], event: notification })).statusCode, 202);
+      assert.deepStrictEqual(published, [{ userId: 'alice', payload: notification }]);
     });
 
     it('un id repetido recibe el evento una sola vez', async () => {
@@ -287,7 +328,7 @@ describe('Rutas internas de llamadas privadas (#50)', () => {
       ['sin event', { userIds: ['alice'] }],
       ['event que no es objeto', { userIds: ['alice'], event: 'CALL_RINGING' }],
       ['event sin type', { userIds: ['alice'], event: { call: {} } }],
-      ['type que no es CALL_', { userIds: ['alice'], event: { type: 'DM_MESSAGE', message: {} } }],
+      ['type que no es CALL_ ni NOTIFICATION_',{ userIds: ['alice'], event: { type: 'DM_MESSAGE', message: {} } }],
       ['type en minúsculas', { userIds: ['alice'], event: { type: 'call_ringing' } }],
     ];
 

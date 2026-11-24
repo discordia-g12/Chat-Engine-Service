@@ -246,7 +246,8 @@ export class ConversationService {
     userId: string,
     channelId: string,
     content: string,
-    attachments?: MessageAttachmentPayload[]
+    attachments?: MessageAttachmentPayload[],
+    replyToId?: string
   ): Promise<MessagePayload> {
     const { conversation, reopens } = await this.checkSend(userId, channelId);
     const files = Array.isArray(attachments) ? attachments : undefined;
@@ -258,8 +259,21 @@ export class ConversationService {
       current = await this.markAccepted(conversation);
     }
 
-    const { message } = await this.deliver(current, userId, content, files);
+    const { message } = await this.deliver(current, userId, content, files, false, replyToId);
     return message;
+  }
+
+  /**
+   * Mismas reglas que para escribir, para una respuesta de hilo en un DM (ADR-07). Una respuesta no acepta
+   * la conversación: si falta aceptarla, se escribe en el chat principal.
+   *
+   * @throws ForbiddenError `DM_NOT_DELIVERABLE` si hay bloqueo o suspensión, `DM_PENDING` si falta aceptar
+   * @throws UpstreamUnavailableError si Auth no responde
+   */
+  static async assertCanReplyInThread(userId: string, channelId: string): Promise<IConversation> {
+    const { conversation, reopens } = await this.checkSend(userId, channelId);
+    if (reopens) throw pending();
+    return conversation;
   }
 
   /**
@@ -345,10 +359,11 @@ export class ConversationService {
     authorId: string,
     content: string,
     attachments?: MessageAttachmentPayload[],
-    isNew = false
+    isNew = false,
+    replyToId?: string
   ): Promise<{ conversation: IConversation; message: MessagePayload }> {
     const channelId = toDmChannelId(conversation._id);
-    const message = await ChatService.sendMessage(authorId, channelId, content, attachments, true);
+    const message = await ChatService.sendMessage(authorId, channelId, content, attachments, true, undefined, replyToId);
 
     const messageId = new Types.ObjectId(message.id);
     // Con mensajes simultáneos gana el último: sin esta condición, el resumen podría quedar en uno anterior

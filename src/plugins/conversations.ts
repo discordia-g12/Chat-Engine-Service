@@ -1,6 +1,6 @@
 import { FastifyInstance } from 'fastify';
 import { ConversationService } from '../services/ConversationService';
-import { PresenceService } from '../services/PresenceService';
+import { isPreferredStatus, PREFERRED_STATUSES, PresenceService } from '../services/PresenceService';
 import { ReadStateService } from '../services/ReadStateService';
 import { MessageAttachmentPayload } from '../services/ChatService';
 import { canonicalUserGuard } from '../helpers/auth';
@@ -58,6 +58,20 @@ export default async function conversationsPlugin(app: FastifyInstance) {
         throw new ValidationError(`userIds accepts at most ${MAX_PRESENCE_USERS} users`);
       }
       return PresenceService.getStatuses(userIds);
+    });
+
+    fastify.get('/presence/me', async (req) => ({ status: await PresenceService.getPreference(req.userId) }));
+
+    fastify.put('/presence/me', async (req) => {
+      const { status } = (req.body ?? {}) as { status?: unknown };
+      if (!isPreferredStatus(status)) {
+        throw new ValidationError(`status must be one of: ${PREFERRED_STATUSES.join(', ')}`);
+      }
+      await PresenceService.setPreference(req.userId, status);
+      PresenceService.announcePreference(req.userId, status).catch((err) =>
+        req.log.warn({ err, userId: req.userId }, 'Failed to announce presence')
+      );
+      return { status };
     });
   });
 }
