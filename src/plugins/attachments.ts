@@ -16,23 +16,27 @@ export default async function attachmentsPlugin(app: FastifyInstance) {
     },
   });
 
-  const uploadDir = StorageService.getUploadDir();
-  if (!fs.existsSync(uploadDir)) {
-    fs.mkdirSync(uploadDir, { recursive: true });
+  // Sin S3 (desarrollo y pruebas) los adjuntos quedan en disco y se sirven sin token. Con S3 no se sirve
+  // nada desde acá: el bucket es privado y cada adjunto sale con una URL firmada (StorageService)
+  if (!StorageService.isS3Configured()) {
+    const uploadDir = StorageService.getUploadDir();
+    if (!fs.existsSync(uploadDir)) {
+      fs.mkdirSync(uploadDir, { recursive: true });
+    }
+
+    await app.register(fastifyStatic, {
+      root: uploadDir,
+      prefix: '/uploads/',
+      decorateReply: false,
+    });
+
+    // Servir también con el prefijo completo por si se llama directo a Chat-Engine sin strip_path
+    await app.register(fastifyStatic, {
+      root: uploadDir,
+      prefix: '/api/v1/chat/uploads/',
+      decorateReply: false,
+    });
   }
-
-  await app.register(fastifyStatic, {
-    root: uploadDir,
-    prefix: '/uploads/',
-    decorateReply: false,
-  });
-
-  // Servir también con el prefijo completo por si se llama directo a Chat-Engine sin strip_path
-  await app.register(fastifyStatic, {
-    root: uploadDir,
-    prefix: '/api/v1/chat/uploads/',
-    decorateReply: false,
-  });
 
   app.post(
     '/channels/:channelId/attachments',

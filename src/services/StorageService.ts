@@ -2,10 +2,16 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 import { PayloadTooLargeError, ValidationError } from '../errors';
-import { MessageAttachmentPayload } from './ChatService';
+import type { MessageAttachmentPayload } from './ChatService';
 import { fileSystem as fs } from '../helpers/fs';
+import { presignS3Get, s3Host, s3ObjectPath } from '../helpers/s3Presign';
 
 export const MAX_ATTACHMENT_SIZE = 10 * 1024 * 1024; // 10 MB
+
+/** Validez de la URL firmada de un adjunto. */
+export const ATTACHMENT_URL_TTL_SECONDS = 24 * 60 * 60;
+/** Cada cuánto cambia la firma (la mitad del TTL): mientras tanto la URL es la misma y se cachea. */
+export const ATTACHMENT_URL_STABLE_SECONDS = 12 * 60 * 60;
 
 export const ALLOWED_EXTENSIONS = new Set([
   '.jpg',
@@ -72,6 +78,59 @@ export class StorageService {
     }
   }
 
+  private static region(): string {
+    return process.env.AWS_REGION || 'us-east-1';
+  }
+
+  /** Host del bucket donde quedan los adjuntos (`<bucket>.s3.<region>.amazonaws.com`). */
+  static attachmentHost(): string {
+    return s3Host(process.env.S3_BUCKET || '', this.region());
+  }
+
+  /**
+   * URL firmada (vence) de un adjunto guardado en S3, para mandarla a un cliente. Solo se firma un adjunto
+   * de `channelId`: el cliente arma la lista de adjuntos del mensaje, así que pegar la URL de un archivo de
+   * otro canal (u otro DM) no le da acceso, porque sale sin firma y S3 responde 403. Cualquier otra URL
+   * (adjuntos viejos en disco, o sin S3 configurado) sale tal cual.
+   */
+  static signAttachmentUrl(url: string, channelId: string, now: Date = new Date()): string {
+    if (!this.isS3Configured()) return url;
+
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      return url;
+    }
+    if (parsed.protocol !== 'https:' || parsed.host !== this.attachmentHost()) return url;
+
+    let key: string;
+    try {
+      key = decodeURIComponent(parsed.pathname.slice(1));
+    } catch {
+      return `https://${parsed.host}${parsed.pathname}`;
+    }
+    if (!key.startsWith(`attachments/${channelId}/`) || key.includes('..')) {
+      return `https://${parsed.host}${parsed.pathname}`;
+    }
+
+    // Firma con la hora redondeada a bloques de 12 h y validez de 24 h: la URL de un adjunto no cambia en
+    // cada mensaje que sale (el navegador la cachea) y siempre le quedan al menos 12 h de vida
+    const window = ATTACHMENT_URL_STABLE_SECONDS * 1000;
+    const signedAt = new Date(Math.floor(now.getTime() / window) * window);
+
+    return presignS3Get({
+      bucket: process.env.S3_BUCKET || '',
+      key,
+      region: this.region(),
+      accessKeyId: process.env.AWS_ACCESS_KEY_ID || '',
+      secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY || '',
+      sessionToken: process.env.AWS_SESSION_TOKEN || undefined,
+      expiresIn: ATTACHMENT_URL_TTL_SECONDS,
+      signedAt,
+    });
+  }
+
   static getUploadDir(): string {
     return process.env.UPLOAD_DIR || path.join(process.cwd(), 'uploads');
   }
@@ -100,19 +159,19 @@ export class StorageService {
           Key: key,
           Body: data,
           ContentType: mimetype,
-          CacheControl: 'public, max-age=31536000, immutable',
+          // private: lo cachea el navegador de quien lo pidió con su URL firmada, ningún intermediario
+          CacheControl: 'private, max-age=31536000, immutable',
         })
       );
 
-      const baseUrl =
-        process.env.S3_PUBLIC_BASE_URL ||
-        `https://${bucket}.s3.${process.env.AWS_REGION || 'us-east-1'}.amazonaws.com`;
-      const url = `${baseUrl.replace(/\/$/, '')}/${key}`;
+      // El prefijo attachments/ es privado: el mensaje guarda la URL sin firma (sola da 403) y cada vez que
+      // sale hacia un cliente se firma (signAttachmentUrl, desde toPayload). La respuesta ya va firmada.
+      const url = `https://${this.attachmentHost()}${s3ObjectPath(key)}`;
 
       return {
         id,
         name: filename,
-        url,
+        url: this.signAttachmentUrl(url, channelId),
         size: data.length,
         contentType: mimetype,
       };

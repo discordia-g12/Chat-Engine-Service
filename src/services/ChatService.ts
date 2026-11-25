@@ -14,6 +14,7 @@ import {
 } from '../helpers/search';
 import { EventConsumer } from './EventConsumer';
 import { ThreadOutbox } from './ThreadOutbox';
+import { StorageService } from './StorageService';
 
 /** Menciones que notifican. Un @everyone o un rol sin permiso queda en el texto pero no acá. */
 export interface MessageMentions {
@@ -241,7 +242,8 @@ export function toPayload(msg: IMessage): MessagePayload {
           attachments: msg.attachments.map((att) => ({
             id: att.id,
             name: att.name,
-            url: att.url,
+            // En S3 el adjunto es privado: sale con una URL firmada que vence (StorageService)
+            url: StorageService.signAttachmentUrl(att.url, msg.channelId),
             size: att.size,
             contentType: att.contentType,
           })),
